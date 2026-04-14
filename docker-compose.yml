@@ -4,7 +4,9 @@ services:
     environment:
       POSTGRES_DB: ibis
       POSTGRES_USER: ibis_user
-      POSTGRES_PASSWORD: ${IBIS_DB_PASSWORD}
+      POSTGRES_PASSWORD_FILE: /run/secrets/db_password
+    secrets:
+      - db_password
     volumes:
       - pgdata:/var/lib/postgresql/data
     healthcheck:
@@ -19,14 +21,18 @@ services:
     depends_on:
       db:
         condition: service_healthy
-    environment:
-      IBIS_DB_PASSWORD: ${IBIS_DB_PASSWORD}
+    secrets:
+      - db_password
     volumes:
       - ./config.json:/app/config.json:ro
       - ./keyFiles:/app/keyFiles:ro
       - ./Downloads:/app/Downloads
       - ./Extracted:/app/Extracted
     command: ["cron", "-f"]
+
+secrets:
+  db_password:
+    file: ./secrets/db_password.txt
 
 volumes:
   pgdata:

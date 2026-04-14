@@ -17,6 +17,7 @@ env/
 # Secrets and config (contains FTP credentials, DB password env var names)
 .env
 config.json
+secrets/
 
 # Data directories (large binary files, managed outside git)
 Downloads/
@@ -32,3 +33,4 @@ keyFiles/
 
 # pytest
 .pytest_cache/
+docs/.
