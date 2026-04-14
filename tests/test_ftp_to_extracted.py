@@ -161,7 +161,8 @@ def test_per_tablet_extraction_failure_continues_other_tablets(tmp_path):
                 with patch('stages.ftp_to_extracted.py7zr.SevenZipFile',
                            side_effect=fake_sevenz):
                     with patch('stages.ftp_to_extracted.os.remove'):
-                        result = stage.run()
+                        with patch('stages.ftp_to_extracted._MAX_WORKERS', 1):
+                            result = stage.run()
 
     assert result.success             # partial success — downstream should run
     assert result.rows_written == 1
