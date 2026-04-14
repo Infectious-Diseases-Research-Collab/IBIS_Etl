@@ -702,8 +702,8 @@ class DataValidator:
         if 'starttime' not in df.columns or 'stoptime' not in df.columns:
             return issues
 
-        start = pd.to_datetime(df['starttime'], errors='coerce')
-        stop = pd.to_datetime(df['stoptime'], errors='coerce')
+        start = pd.to_datetime(df['starttime'], errors='coerce', format='mixed')
+        stop = pd.to_datetime(df['stoptime'], errors='coerce', format='mixed')
         both_valid = start.notna() & stop.notna()
         delta_minutes = (stop - start).dt.total_seconds() / 60
 
@@ -761,7 +761,7 @@ class DataValidator:
             return issues
 
         today = pd.Timestamp.now().normalize()
-        dob = pd.to_datetime(df['dob'], errors='coerce')
+        dob = pd.to_datetime(df['dob'], errors='coerce', format='mixed')
         valid_dob = dob.notna()
 
         future = valid_dob & (dob > today)
@@ -850,7 +850,7 @@ class DataValidator:
             ))
 
         if 'starttime' in df.columns:
-            start = pd.to_datetime(df['starttime'], errors='coerce')
+            start = pd.to_datetime(df['starttime'], errors='coerce', format='mixed')
             both = valid_vdate & start.notna()
             date_mismatch = both & (vdate.dt.normalize() != start.dt.normalize())
             if date_mismatch.any():
@@ -892,7 +892,7 @@ class DataValidator:
             if col not in df.columns:
                 continue
 
-            appt = pd.to_datetime(df[col], errors='coerce')
+            appt = pd.to_datetime(df[col], errors='coerce', format='mixed')
             both = valid_vdate & appt.notna()
 
             before_visit = both & (appt < vdate)
@@ -1044,7 +1044,7 @@ class DataValidator:
         if 'interviewer_id' not in df.columns or 'starttime' not in df.columns:
             return issues
 
-        start = pd.to_datetime(df['starttime'], errors='coerce')
+        start = pd.to_datetime(df['starttime'], errors='coerce', format='mixed')
         valid_start = start.notna() & df['interviewer_id'].notna()
 
         work_df = df.loc[valid_start, ['interviewer_id']].copy()
