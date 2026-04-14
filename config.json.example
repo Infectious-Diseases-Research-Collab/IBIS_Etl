@@ -1,0 +1,46 @@
+{
+  "communities": {
+    "country1_community1": {
+      "community_name": "Community Name",
+      "country": "country1",
+      "remotefilepath_download": "/Country1/CommunityName/"
+    },
+    "country2_community1": {
+      "community_name": "Community Name",
+      "country": "country2",
+      "remotefilepath_download": "/Country2/CommunityName/"
+    }
+  },
+  "ftp": {
+    "hostname": "ftp.example.com",
+    "username_ibis": "ftp_username"
+  },
+  "keyfiles": {
+    "ftp_cred_filename_IBIS": "keyFiles/IBIS_ftp.ini",
+    "ftp_key_file_IBIS": "keyFiles/IBIS_ftp.key",
+    "sevenz_cred_filename": "keyFiles/Sevenz.ini",
+    "sevenz_key_file": "keyFiles/Sevenz.key"
+  },
+  "access_table_name": "baseline",
+  "excluded_tablets": [],
+  "db": {
+    "host": "db",
+    "port": 5432,
+    "name": "ibis",
+    "user": "ibis_user",
+    "password_env": "IBIS_DB_PASSWORD"
+  },
+  "trial": {
+    "name": "ibis",
+    "dedup_key": "uniqueid",
+    "dedup_strategy": "latest_snapshot",
+    "country_code_map": {
+      "country1": 1,
+      "country2": 2
+    }
+  },
+  "schedule": {
+    "pipeline_cron": "0 2 * * *",
+    "store_cron": "0 3 * * 0"
+  }
+}
