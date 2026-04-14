@@ -16,7 +16,8 @@ def create_db_engine(config) -> Engine:
     Uses URL.create() to safely handle special characters in the password.
     """
     db = config.get('db')
-    password = os.environ[db['password_env']]
+    with open(db['password_secret_file']) as f:
+        password = f.read().strip()
     url = URL.create(
         drivername='postgresql+psycopg2',
         username=db['user'],
