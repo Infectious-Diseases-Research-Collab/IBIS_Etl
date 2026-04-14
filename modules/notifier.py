@@ -2,6 +2,10 @@ from __future__ import annotations
 
 import html as _html
 import logging
+import smtplib
+from datetime import date
+from email.mime.multipart import MIMEMultipart
+from email.mime.text import MIMEText
 from cryptography.fernet import Fernet
 import pandas as pd
 from stages.base import StageResult
@@ -140,3 +144,49 @@ def _build_body(
     plain = f'{stage_section}\n\n{validation_section}'
     html_body = f'<pre style="font-family:monospace;font-size:13px">{_html.escape(plain)}</pre>'
     return plain, html_body
+
+
+def _send(email_cfg: dict, subject: str, plain: str, html: str) -> None:
+    ini_path = email_cfg['keyfiles']['smtp_ini']
+    key_path = email_cfg['keyfiles']['smtp_key']
+    username, password = _load_smtp_credentials(ini_path, key_path)
+
+    msg = MIMEMultipart('alternative')
+    msg['Subject'] = subject
+    msg['From'] = email_cfg['sender']
+    msg['To'] = ', '.join(email_cfg['recipients'])
+    msg.attach(MIMEText(plain, 'plain'))
+    msg.attach(MIMEText(html, 'html'))
+
+    with smtplib.SMTP(email_cfg['smtp_host'], email_cfg['smtp_port']) as smtp:
+        smtp.starttls()
+        smtp.login(username, password)
+        smtp.sendmail(email_cfg['sender'], email_cfg['recipients'], msg.as_string())
+
+
+def send_pipeline_report(
+    results: dict[str, StageResult],
+    stages: list[str],
+    engine,
+    config,
+) -> None:
+    """
+    Send an email summary of the pipeline run if any stage failed or validation
+    ERRORs exist. Silently returns if no email config is present or the run is clean.
+    Never raises — SMTP errors are logged and swallowed.
+    """
+    email_cfg = config.get('email')
+    if not email_cfg:
+        return
+    try:
+        if not _should_notify(results, engine):
+            logger.info('Notifier: clean run — no email sent.')
+            return
+        report_df = _query_validation_report(engine)
+        today = date.today().strftime('%d %b %Y')
+        subject = f'IBIS Pipeline \u2014 Issues found ({today})'
+        plain, html = _build_body(results, stages, report_df)
+        _send(email_cfg, subject, plain, html)
+        logger.info(f'Pipeline report sent to {email_cfg["recipients"]}.')
+    except Exception as exc:
+        logger.error(f'Notifier failed \u2014 email not sent: {exc}')
