@@ -1,0 +1,11 @@
+keyFiles/
+Downloads/
+Extracted/
+*.key
+*.ini
+__pycache__/
+**/__pycache__/
+*.pyc
+.env
+docs/
+tests/__pycache__/

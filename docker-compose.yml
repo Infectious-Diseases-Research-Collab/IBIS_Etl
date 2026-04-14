@@ -1,0 +1,32 @@
+services:
+  db:
+    image: postgres:16
+    environment:
+      POSTGRES_DB: ibis
+      POSTGRES_USER: ibis_user
+      POSTGRES_PASSWORD: ${IBIS_DB_PASSWORD}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ibis_user"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+      start_period: 10s
+
+  etl:
+    build: .
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      IBIS_DB_PASSWORD: ${IBIS_DB_PASSWORD}
+    volumes:
+      - ./config.json:/app/config.json:ro
+      - ./keyFiles:/app/keyFiles:ro
+      - ./Downloads:/app/Downloads
+      - ./Extracted:/app/Extracted
+    command: ["cron", "-f"]
+
+volumes:
+  pgdata:
