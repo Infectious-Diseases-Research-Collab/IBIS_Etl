@@ -23,7 +23,6 @@ secrets/
 Downloads/
 Extracted/
 Output/
-keyFiles/
 
 # Logs
 *.log
