@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import html as _html
 import logging
 from cryptography.fernet import Fernet
 import pandas as pd
@@ -96,7 +97,7 @@ def _build_validation_section(report_df: pd.DataFrame | None) -> str:
         lines.append('No validation errors.')
     else:
         lines += ['Validation Errors', sep]
-        for (country, site), group in errors.groupby(['country', 'site'], sort=True):
+        for (country, site), group in errors.groupby(['country', 'site'], sort=True, dropna=False):
             header = f'{country} / {site}' if site else str(country)
             lines.append(header)
             for _, row in group.iterrows():
@@ -137,5 +138,5 @@ def _build_body(
     stage_section = _build_stage_summary(results, stages)
     validation_section = _build_validation_section(report_df)
     plain = f'{stage_section}\n\n{validation_section}'
-    html = f'<pre style="font-family:monospace;font-size:13px">{plain}</pre>'
-    return plain, html
+    html_body = f'<pre style="font-family:monospace;font-size:13px">{_html.escape(plain)}</pre>'
+    return plain, html_body

@@ -4,7 +4,7 @@ import pandas as pd
 import pytest
 from unittest.mock import MagicMock, patch
 from cryptography.fernet import Fernet
-from modules.notifier import _load_smtp_credentials, _should_notify, _query_validation_report
+from modules.notifier import _load_smtp_credentials, _should_notify, _query_validation_report, _build_stage_summary, _build_validation_section
 from stages.base import StageResult
 
 
@@ -87,7 +87,6 @@ def test_query_validation_report_returns_none_on_db_error():
 
 
 def test_build_stage_summary_shows_all_statuses():
-    from modules.notifier import _build_stage_summary
     results = {
         'mdb_to_bronze':    StageResult(success=True, rows_written=5416),
         'bronze_to_silver': StageResult(success=False, errors=['err']),
@@ -101,7 +100,6 @@ def test_build_stage_summary_shows_all_statuses():
 
 
 def test_build_stage_summary_no_rows_for_zero():
-    from modules.notifier import _build_stage_summary
     results = {'transform_ibis': StageResult(success=True, rows_written=0)}
     stages = ['transform_ibis']
     text = _build_stage_summary(results, stages)
@@ -110,13 +108,11 @@ def test_build_stage_summary_no_rows_for_zero():
 
 
 def test_build_validation_section_none_engine():
-    from modules.notifier import _build_validation_section
     text = _build_validation_section(None)
     assert 'unavailable' in text.lower()
 
 
 def test_build_validation_section_errors_and_warnings():
-    from modules.notifier import _build_validation_section
     report = pd.DataFrame({
         'severity':        ['ERROR', 'ERROR', 'WARNING', 'WARNING', 'WARNING'],
         'check':           ['dup_id', 'dup_id', 'missing_appt', 'missing_appt', 'sparse_col'],
@@ -135,7 +131,6 @@ def test_build_validation_section_errors_and_warnings():
 
 
 def test_build_validation_section_truncates_ids():
-    from modules.notifier import _build_validation_section
     ids = ','.join([f'P{i:03d}' for i in range(15)])
     report = pd.DataFrame({
         'severity':        ['ERROR'],
