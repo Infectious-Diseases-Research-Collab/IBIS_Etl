@@ -12,12 +12,12 @@ def _load_smtp_credentials(ini_path: str, key_path: str) -> tuple[str, str]:
     Returns (username, password).
     Raises KeyError if 'Username' or 'Password' is absent from the ini file.
     """
-    with open(key_path) as f:
+    with open(key_path, 'r') as f:
         key = f.read().strip().encode()
     cipher = Fernet(key)
 
     cfg: dict[str, str] = {}
-    with open(ini_path) as f:
+    with open(ini_path, 'r') as f:
         for line in f:
             line = line.strip()
             if not line or line.startswith('#') or '=' not in line:
@@ -30,5 +30,7 @@ def _load_smtp_credentials(ini_path: str, key_path: str) -> tuple[str, str]:
     if 'Password' not in cfg:
         raise KeyError(f"'Password' key not found in credential file: {ini_path}")
 
-    return cipher.decrypt(cfg['Username'].encode()).decode(), \
-           cipher.decrypt(cfg['Password'].encode()).decode()
+    return (
+        cipher.decrypt(cfg['Username'].encode()).decode(),
+        cipher.decrypt(cfg['Password'].encode()).decode(),
+    )
