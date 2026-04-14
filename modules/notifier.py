@@ -44,7 +44,8 @@ def _query_validation_report(engine) -> pd.DataFrame | None:
     """
     try:
         return pd.read_sql('SELECT * FROM gold_ibis.ds_validation_report', engine)
-    except Exception:
+    except Exception as exc:
+        logger.warning("Could not query ds_validation_report: %s", exc)
         return None
 
 
