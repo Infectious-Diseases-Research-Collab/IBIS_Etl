@@ -2,7 +2,8 @@ import pytest
 from ibis import topological_sort, build_run_list
 
 _STAGE_DEPS = {
-    'mdb_to_bronze':    [],
+    'ftp_to_extracted': [],
+    'mdb_to_bronze':    ['ftp_to_extracted'],
     'bronze_to_silver': ['mdb_to_bronze'],
     'transform_ibis':   ['bronze_to_silver'],
     'measures_ibis':    ['transform_ibis'],
@@ -13,7 +14,7 @@ _STAGE_DEPS = {
 def test_topological_sort_full_order():
     order = topological_sort(_STAGE_DEPS)
     assert order == [
-        'mdb_to_bronze', 'bronze_to_silver', 'transform_ibis',
+        'ftp_to_extracted', 'mdb_to_bronze', 'bronze_to_silver', 'transform_ibis',
         'measures_ibis', 'promote_ibis', 'store_ibis',
     ]
 
@@ -24,7 +25,7 @@ def test_topological_sort_single_stage():
 def test_build_run_list_all():
     stages = build_run_list(_STAGE_DEPS, run_all=True)
     assert stages == [
-        'mdb_to_bronze', 'bronze_to_silver', 'transform_ibis',
+        'ftp_to_extracted', 'mdb_to_bronze', 'bronze_to_silver', 'transform_ibis',
         'measures_ibis', 'promote_ibis', 'store_ibis',
     ]
 

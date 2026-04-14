@@ -19,7 +19,7 @@ logger = logging.getLogger(__name__)
 
 class MdbToBronze(BaseStage):
     name = 'mdb_to_bronze'
-    dependencies: list[str] = []
+    dependencies: list[str] = ['ftp_to_extracted']
 
     def run(self) -> StageResult:
         communities = self.config.get('communities')
