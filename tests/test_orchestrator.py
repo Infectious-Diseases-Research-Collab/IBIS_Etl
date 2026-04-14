@@ -54,8 +54,9 @@ def test_run_pipeline_skips_downstream_on_failure():
                       return_value=StageResult(success=False, errors=['boom'])):
         # Patch BronzeToSilver.run — should NOT be called
         with patch.object(STAGE_CLASSES['bronze_to_silver'], 'run') as mock_silver:
-            with patch('sys.exit'):
-                run_pipeline(['mdb_to_bronze', 'bronze_to_silver'], config, engine)
+            with patch('ibis.send_pipeline_report'):
+                with patch('sys.exit'):
+                    run_pipeline(['mdb_to_bronze', 'bronze_to_silver'], config, engine)
 
     mock_silver.assert_not_called()
 
@@ -67,8 +68,9 @@ def test_run_pipeline_wraps_unexpected_exception():
 
     with patch.object(STAGE_CLASSES['mdb_to_bronze'], 'run',
                       side_effect=RuntimeError('unexpected crash')):
-        with patch('sys.exit') as mock_exit:
-            run_pipeline(['mdb_to_bronze'], config, engine)
+        with patch('ibis.send_pipeline_report'):
+            with patch('sys.exit') as mock_exit:
+                run_pipeline(['mdb_to_bronze'], config, engine)
 
     mock_exit.assert_called_once_with(1)
 
@@ -80,7 +82,38 @@ def test_run_pipeline_exits_1_on_failure():
 
     with patch.object(STAGE_CLASSES['mdb_to_bronze'], 'run',
                       return_value=StageResult(success=False, errors=['fail'])):
-        with patch('sys.exit') as mock_exit:
-            run_pipeline(['mdb_to_bronze'], config, engine)
+        with patch('ibis.send_pipeline_report'):
+            with patch('sys.exit') as mock_exit:
+                run_pipeline(['mdb_to_bronze'], config, engine)
 
     mock_exit.assert_called_once_with(1)
+
+
+def test_run_pipeline_calls_notifier_on_failure():
+    """send_pipeline_report is called after a failed run."""
+    config = MagicMock()
+    engine = MagicMock()
+
+    with patch.object(STAGE_CLASSES['mdb_to_bronze'], 'run',
+                      return_value=StageResult(success=False, errors=['boom'])):
+        with patch('ibis.send_pipeline_report') as mock_notify:
+            with patch('sys.exit'):
+                run_pipeline(['mdb_to_bronze'], config, engine)
+
+    mock_notify.assert_called_once()
+    call_kwargs = mock_notify.call_args.kwargs
+    assert 'mdb_to_bronze' in call_kwargs['results']
+    assert call_kwargs['stages'] == ['mdb_to_bronze']
+
+
+def test_run_pipeline_calls_notifier_on_success():
+    """send_pipeline_report is called even on a clean run (it decides internally)."""
+    config = MagicMock()
+    engine = MagicMock()
+
+    with patch.object(STAGE_CLASSES['mdb_to_bronze'], 'run',
+                      return_value=StageResult(success=True, rows_written=10)):
+        with patch('ibis.send_pipeline_report') as mock_notify:
+            run_pipeline(['mdb_to_bronze'], config, engine)
+
+    mock_notify.assert_called_once()
