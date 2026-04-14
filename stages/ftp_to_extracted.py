@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import logging
 import os
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 import py7zr
 
@@ -14,6 +15,7 @@ from stages.base import BaseStage, StageResult
 logger = logging.getLogger(__name__)
 
 _MAX_DOWNLOAD_RETRIES = 3
+_MAX_WORKERS = 4
 
 
 def _download_with_retry(
@@ -41,6 +43,53 @@ def _download_with_retry(
             # in write mode and will overwrite it. Cleaning up here caused
             # spurious "No such file or directory" errors on subsequent attempts.
     raise last_exc
+
+
+def _process_tablet(
+    hostname: str,
+    username: str,
+    ftp_password: str,
+    sevenz_password: str,
+    remote_path: str,
+    filename: str,
+    download_dir: str,
+    extract_dir: str,
+    country: str,
+) -> tuple[int, str | None]:
+    """
+    Download, extract and delete one tablet archive.
+    Returns (1, None) on success, (0, None) if skipped, (0, error_msg) on failure.
+    Each call uses its own SFTP connection — safe to run concurrently.
+    """
+    folder_name = filename[:-3]  # strip .7z
+    tablet_extract_dir = os.path.join(extract_dir, folder_name)
+
+    if os.path.exists(tablet_extract_dir):
+        logger.info(f"[{country}] Skipping {filename} — already extracted.")
+        return 0, None
+
+    local_archive = os.path.join(download_dir, filename)
+    try:
+        # Retry download on network errors (e.g. Mismatched MAC).
+        # Extraction errors are not retried — a corrupt archive
+        # won't be fixed by re-downloading the same file.
+        _download_with_retry(
+            hostname, username, ftp_password,
+            remote_path, filename, local_archive,
+        )
+        with py7zr.SevenZipFile(
+            local_archive, mode='r', password=sevenz_password
+        ) as archive:
+            archive.extractall(path=tablet_extract_dir)
+        os.remove(local_archive)
+        logger.info(f"[{country}] Extracted {filename} → {tablet_extract_dir}")
+        return 1, None
+    except Exception as exc:
+        msg = f"[{country}] Failed to process '{filename}': {exc}"
+        logger.error(msg)
+        if os.path.exists(local_archive):
+            os.remove(local_archive)
+        return 0, msg
 
 
 class FtpToExtracted(BaseStage):
@@ -86,40 +135,21 @@ class FtpToExtracted(BaseStage):
                     f"[{country}] {len(latest)} latest archive(s) found on FTP."
                 )
 
-                for tablet_id, filename in sorted(latest.items()):
-                    folder_name = filename[:-3]  # strip .7z
-                    tablet_extract_dir = os.path.join(extract_dir, folder_name)
-
-                    if os.path.exists(tablet_extract_dir):
-                        logger.info(
-                            f"[{country}] Skipping {filename} — already extracted."
-                        )
-                        continue
-
-                    local_archive = os.path.join(download_dir, filename)
-                    try:
-                        # Retry download on network errors (e.g. Mismatched MAC).
-                        # Extraction errors are not retried — a corrupt archive
-                        # won't be fixed by re-downloading the same file.
-                        _download_with_retry(
-                            hostname, username, ftp_password,
-                            remote_path, filename, local_archive,
-                        )
-                        with py7zr.SevenZipFile(
-                            local_archive, mode='r', password=sevenz_password
-                        ) as archive:
-                            archive.extractall(path=tablet_extract_dir)
-                        os.remove(local_archive)
-                        logger.info(
-                            f"[{country}] Extracted {filename} → {tablet_extract_dir}"
-                        )
-                        total_downloaded += 1
-                    except Exception as exc:
-                        msg = f"[{country}] Failed to process '{filename}': {exc}"
-                        logger.error(msg)
-                        errors.append(msg)
-                        if os.path.exists(local_archive):
-                            os.remove(local_archive)
+                # Download tablets in parallel — each worker uses its own connection.
+                with ThreadPoolExecutor(max_workers=_MAX_WORKERS) as executor:
+                    futures = {
+                        executor.submit(
+                            _process_tablet,
+                            hostname, username, ftp_password, sevenz_password,
+                            remote_path, filename, download_dir, extract_dir, country,
+                        ): filename
+                        for filename in sorted(latest.values())
+                    }
+                    for future in as_completed(futures):
+                        downloaded, error_msg = future.result()
+                        total_downloaded += downloaded
+                        if error_msg:
+                            errors.append(error_msg)
 
             except Exception as exc:
                 msg = f"[{country}] SFTP connection failed: {exc}"
