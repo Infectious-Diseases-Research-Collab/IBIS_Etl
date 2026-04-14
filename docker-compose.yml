@@ -25,7 +25,7 @@ services:
       - db_password
     volumes:
       - ./config.json:/app/config.json:ro
-      - ./keyFiles:/app/keyFiles:ro
+      - ./secrets:/app/secrets:ro
       - ./Downloads:/app/Downloads
       - ./Extracted:/app/Extracted
     command: ["cron", "-f"]
