@@ -77,7 +77,7 @@ class DataValidator:
     _NAME_FIELD = 'participants_name'
 
     # Minimum similarity ratio (0–1) for two names to be flagged as related.
-    _NAME_SIMILARITY_THRESHOLD = 0.90
+    _NAME_SIMILARITY_THRESHOLD = 0.85
 
     # Maps lowercase country name to the expected screening_id prefix.
     _COUNTRY_ID_PREFIXES: dict[str, str] = {
@@ -611,11 +611,10 @@ class DataValidator:
 
     def _check_similar_names(self, df: pd.DataFrame) -> list[dict]:
         """
-        Flag pairs of names that are highly similar but not identical.
-        Returns one row per similar pair so every match is visible in the CSV.
-        Uses rapidfuzz.process.cdist to compute the full pairwise similarity
-        matrix in a single vectorised C call — roughly 100× faster than a
-        Python difflib loop for datasets of a few thousand records.
+        Flag pairs of names that are highly similar but not identical AND share
+        the same date of birth — the combination strongly indicates the same
+        person enrolled twice with a name spelling variation.
+        Uses rapidfuzz.process.cdist for vectorised pairwise scoring.
         """
         if self._NAME_FIELD not in df.columns:
             return []
@@ -656,26 +655,39 @@ class DataValidator:
         if not pairs:
             return []
 
-        # Sort by similarity descending so highest-risk pairs appear first
-        pairs.sort(key=lambda x: x[4], reverse=True)
-
         has_dob = 'dob' in df.columns
         has_tablet = 'tabletnum' in df.columns
 
+        # Pre-compute normalised DOB (date only) for each index so we can
+        # filter pairs to those where both records share the same DOB.
+        if has_dob:
+            dob_series = pd.to_datetime(df['dob'], errors='coerce', format='mixed').dt.normalize()
+        else:
+            dob_series = None
+
+        # Sort by similarity descending so highest-risk pairs appear first
+        pairs.sort(key=lambda x: x[4], reverse=True)
+
         issues = []
         for name_a, name_b, idx_a, idx_b, sim in pairs:
-            if has_dob:
-                dob_a = df.at[idx_a, 'dob'] if idx_a in df.index else ''
-                dob_b = df.at[idx_b, 'dob'] if idx_b in df.index else ''
-                dob_note = f" | DOB: {dob_a} / {dob_b}"
+            # Only flag when DOBs are present and identical — the key signal
+            # that two similar names are the same person, not just coincidence.
+            if dob_series is not None:
+                dob_a = dob_series.get(idx_a)
+                dob_b = dob_series.get(idx_b)
+                if pd.isna(dob_a) or pd.isna(dob_b) or dob_a != dob_b:
+                    continue
+                dob_note = f" | DOB: {dob_a.date()}"
             else:
                 dob_note = ''
+
             if has_tablet:
                 tab_a = df.at[idx_a, 'tabletnum'] if idx_a in df.index else ''
                 tab_b = df.at[idx_b, 'tabletnum'] if idx_b in df.index else ''
                 tablet_note = f" | Tablet: {tab_a} / {tab_b}"
             else:
                 tablet_note = ''
+
             issues.append(dict(
                 check='similar_name',
                 severity='WARNING',
