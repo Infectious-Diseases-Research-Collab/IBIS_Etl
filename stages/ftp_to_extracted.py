@@ -37,8 +37,9 @@ def _download_with_retry(
                 f"Download attempt {attempt}/{_MAX_DOWNLOAD_RETRIES} failed "
                 f"for '{filename}': {exc}"
             )
-            if os.path.exists(local_archive):
-                os.remove(local_archive)
+            # Do not remove the partial file between retries — paramiko opens
+            # in write mode and will overwrite it. Cleaning up here caused
+            # spurious "No such file or directory" errors on subsequent attempts.
     raise last_exc
 
 
@@ -107,7 +108,7 @@ class FtpToExtracted(BaseStage):
                         with py7zr.SevenZipFile(
                             local_archive, mode='r', password=sevenz_password
                         ) as archive:
-                            archive.extractall(path=extract_dir)
+                            archive.extractall(path=tablet_extract_dir)
                         os.remove(local_archive)
                         logger.info(
                             f"[{country}] Extracted {filename} → {tablet_extract_dir}"
