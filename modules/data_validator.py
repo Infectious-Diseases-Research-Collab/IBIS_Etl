@@ -721,6 +721,7 @@ class DataValidator:
 
         impossible = both_valid & (delta_minutes < 0)
         if impossible.any():
+            examples = [f"{m:.1f} min" for m in delta_minutes[impossible].head(5)]
             issues.append(dict(
                 check='impossible_duration',
                 severity='ERROR',
@@ -728,13 +729,14 @@ class DataValidator:
                 record_count=int(impossible.sum()),
                 detail=(
                     f"{impossible.sum()} record(s) have stoptime before starttime "
-                    f"(negative duration)."
+                    f"(negative duration). Examples: {examples}"
                 ),
                 affected_subjids=self._subjids_for_mask(df, impossible),
             ))
 
         too_short = both_valid & (delta_minutes >= 0) & (delta_minutes < 3)
         if too_short.any():
+            examples = [f"{m:.1f} min" for m in delta_minutes[too_short].head(5)]
             issues.append(dict(
                 check='duration_too_short',
                 severity='WARNING',
@@ -742,13 +744,15 @@ class DataValidator:
                 record_count=int(too_short.sum()),
                 detail=(
                     f"{too_short.sum()} record(s) have an interview duration "
-                    f"under 3 minutes — form may not have been completed properly."
+                    f"under 3 minutes — form may not have been completed properly. "
+                    f"Examples: {examples}"
                 ),
                 affected_subjids=self._subjids_for_mask(df, too_short),
             ))
 
         too_long = both_valid & (delta_minutes > 240)
         if too_long.any():
+            examples = [f"{m:.1f} min" for m in delta_minutes[too_long].head(5)]
             issues.append(dict(
                 check='duration_too_long',
                 severity='WARNING',
@@ -756,7 +760,8 @@ class DataValidator:
                 record_count=int(too_long.sum()),
                 detail=(
                     f"{too_long.sum()} record(s) have an interview duration "
-                    f"over 240 minutes — tablet may have been left open."
+                    f"over 240 minutes — tablet may have been left open. "
+                    f"Examples: {examples}"
                 ),
                 affected_subjids=self._subjids_for_mask(df, too_long),
             ))
@@ -778,18 +783,26 @@ class DataValidator:
 
         future = valid_dob & (dob > today)
         if future.any():
+            examples = [str(d.date()) for d in dob[future].dropna().head(5)]
             issues.append(dict(
                 check='future_dob',
                 severity='ERROR',
                 field='dob',
                 record_count=int(future.sum()),
-                detail=f"{future.sum()} record(s) have a date of birth in the future.",
+                detail=(
+                    f"{future.sum()} record(s) have a date of birth in the future. "
+                    f"Examples: {examples}"
+                ),
                 affected_subjids=self._subjids_for_mask(df, future),
             ))
 
         derived_age = (today - dob).dt.days / 365.25
         ineligible = valid_dob & ~future & ((derived_age < 10) | (derived_age > 110))
         if ineligible.any():
+            examples = [
+                f"{dob[i].date()} (age {derived_age[i]:.1f})"
+                for i in dob[ineligible].dropna().head(5).index
+            ]
             issues.append(dict(
                 check='dob_eligibility',
                 severity='ERROR',
@@ -797,7 +810,8 @@ class DataValidator:
                 record_count=int(ineligible.sum()),
                 detail=(
                     f"{ineligible.sum()} record(s) have a dob that implies an age "
-                    f"outside the eligible range 10-110 years."
+                    f"outside the eligible range 10-110 years. "
+                    f"Examples: {examples}"
                 ),
                 affected_subjids=self._subjids_for_mask(df, ineligible),
             ))
@@ -808,6 +822,10 @@ class DataValidator:
             age_diff = (derived_age - recorded_age).abs()
             mismatch = usable & (age_diff > 2)
             if mismatch.any():
+                examples = [
+                    f"dob={dob[i].date()}, derived={derived_age[i]:.1f}, recorded={int(recorded_age[i])}"
+                    for i in dob[mismatch].dropna().head(5).index
+                ]
                 issues.append(dict(
                     check='dob_age_mismatch',
                     severity='WARNING',
@@ -815,7 +833,8 @@ class DataValidator:
                     record_count=int(mismatch.sum()),
                     detail=(
                         f"{mismatch.sum()} record(s) have a discrepancy of more than "
-                        f"2 years between dob and respondants_age."
+                        f"2 years between dob and respondants_age. "
+                        f"Examples: {examples}"
                     ),
                     affected_subjids=self._subjids_for_mask(df, mismatch),
                 ))
@@ -838,17 +857,22 @@ class DataValidator:
 
         future = valid_vdate & (vdate > today)
         if future.any():
+            examples = [str(d.date()) for d in vdate[future].dropna().head(5)]
             issues.append(dict(
                 check='future_visit_date',
                 severity='ERROR',
                 field='vdate',
                 record_count=int(future.sum()),
-                detail=f"{future.sum()} record(s) have a visit date in the future.",
+                detail=(
+                    f"{future.sum()} record(s) have a visit date in the future. "
+                    f"Examples: {examples}"
+                ),
                 affected_subjids=self._subjids_for_mask(df, future),
             ))
 
         stale = valid_vdate & (vdate < stale_cutoff)
         if stale.any():
+            examples = [str(d.date()) for d in vdate[stale].dropna().head(5)]
             issues.append(dict(
                 check='stale_visit_date',
                 severity='WARNING',
@@ -856,7 +880,8 @@ class DataValidator:
                 record_count=int(stale.sum()),
                 detail=(
                     f"{stale.sum()} record(s) have a visit date more than "
-                    f"12 months in the past — possible incomplete sync."
+                    f"12 months in the past — possible incomplete sync. "
+                    f"Examples: {examples}"
                 ),
                 affected_subjids=self._subjids_for_mask(df, stale),
             ))
@@ -1082,6 +1107,7 @@ class DataValidator:
 
         unusual_hour = start.notna() & start.dt.hour.between(0, 4)
         if unusual_hour.any():
+            examples = [str(t) for t in start[unusual_hour].head(5)]
             issues.append(dict(
                 check='unusual_interview_hour',
                 severity='WARNING',
@@ -1089,7 +1115,8 @@ class DataValidator:
                 record_count=int(unusual_hour.sum()),
                 detail=(
                     f"{unusual_hour.sum()} record(s) have a starttime between "
-                    f"midnight and 04:59 — possible backdating or clock error."
+                    f"midnight and 04:59 — possible backdating or clock error. "
+                    f"Examples: {examples}"
                 ),
                 affected_subjids=self._subjids_for_mask(df, unusual_hour),
             ))
