@@ -13,6 +13,34 @@ from stages.base import BaseStage, StageResult
 
 logger = logging.getLogger(__name__)
 
+_MAX_DOWNLOAD_RETRIES = 3
+
+
+def _download_with_retry(
+    hostname: str,
+    username: str,
+    ftp_password: str,
+    remote_path: str,
+    filename: str,
+    local_archive: str,
+) -> None:
+    """Download a single archive, retrying up to _MAX_DOWNLOAD_RETRIES times on network errors."""
+    last_exc: Exception = Exception('no attempts made')
+    for attempt in range(1, _MAX_DOWNLOAD_RETRIES + 1):
+        try:
+            with SFTPClient(hostname, username, ftp_password) as sftp:
+                sftp.download_file(remote_path + filename, local_archive)
+            return
+        except Exception as exc:
+            last_exc = exc
+            logger.warning(
+                f"Download attempt {attempt}/{_MAX_DOWNLOAD_RETRIES} failed "
+                f"for '{filename}': {exc}"
+            )
+            if os.path.exists(local_archive):
+                os.remove(local_archive)
+    raise last_exc
+
 
 class FtpToExtracted(BaseStage):
     name = 'ftp_to_extracted'
@@ -69,10 +97,13 @@ class FtpToExtracted(BaseStage):
 
                     local_archive = os.path.join(download_dir, filename)
                     try:
-                        # Fresh connection per tablet — avoids server dropping
-                        # a long-running session mid-batch (Mismatched MAC).
-                        with SFTPClient(hostname, username, ftp_password) as sftp:
-                            sftp.download_file(remote_path + filename, local_archive)
+                        # Retry download on network errors (e.g. Mismatched MAC).
+                        # Extraction errors are not retried — a corrupt archive
+                        # won't be fixed by re-downloading the same file.
+                        _download_with_retry(
+                            hostname, username, ftp_password,
+                            remote_path, filename, local_archive,
+                        )
                         with py7zr.SevenZipFile(
                             local_archive, mode='r', password=sevenz_password
                         ) as archive:
@@ -94,8 +125,10 @@ class FtpToExtracted(BaseStage):
                 logger.error(msg)
                 errors.append(msg)
 
+        # Partial success: downstream stages run if at least one tablet was
+        # extracted. Errors are still reported in the pipeline summary.
         return StageResult(
-            success=len(errors) == 0,
+            success=total_downloaded > 0 or len(errors) == 0,
             rows_written=total_downloaded,
             errors=errors,
         )

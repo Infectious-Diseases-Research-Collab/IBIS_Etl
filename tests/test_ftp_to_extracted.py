@@ -163,7 +163,7 @@ def test_per_tablet_extraction_failure_continues_other_tablets(tmp_path):
                     with patch('stages.ftp_to_extracted.os.remove'):
                         result = stage.run()
 
-    assert not result.success
+    assert result.success             # partial success — downstream should run
     assert result.rows_written == 1
     assert len(result.errors) == 1
 
@@ -187,3 +187,38 @@ def test_all_tablets_failed_returns_success_false(tmp_path):
     assert not result.success
     assert result.rows_written == 0
     assert len(result.errors) == 1
+
+
+def test_download_retried_on_network_error(tmp_path):
+    """A flaky download that fails twice then succeeds on the third attempt."""
+    stage = FtpToExtracted(config=_make_config(), engine=MagicMock())
+
+    mock_archive = MagicMock()
+    mock_archive.__enter__ = MagicMock(return_value=mock_archive)
+    mock_archive.__exit__ = MagicMock(return_value=False)
+
+    download_attempts = {'n': 0}
+
+    def flaky_sftp(*args, **kwargs):
+        instance = _mock_sftp(['Tablet221_2026_04_01-10_00_00.7z'])
+        def flaky_download(remote, local):
+            download_attempts['n'] += 1
+            if download_attempts['n'] < 3:
+                raise Exception('network error')
+        instance.download_file = MagicMock(side_effect=flaky_download)
+        return instance
+
+    with patch('stages.ftp_to_extracted.get_decrypted_password', return_value='s'):
+        with patch('stages.ftp_to_extracted.SFTPClient', side_effect=flaky_sftp):
+            with patch('stages.ftp_to_extracted.get_country_paths', return_value={
+                'download_path': str(tmp_path / 'Downloads' / 'Kenya'),
+                'extract_path': str(tmp_path / 'Extracted' / 'Kenya'),
+            }):
+                with patch('stages.ftp_to_extracted.py7zr.SevenZipFile',
+                           return_value=mock_archive):
+                    with patch('stages.ftp_to_extracted.os.remove'):
+                        result = stage.run()
+
+    assert result.success
+    assert result.rows_written == 1
+    assert download_attempts['n'] == 3   # failed twice, succeeded on third
