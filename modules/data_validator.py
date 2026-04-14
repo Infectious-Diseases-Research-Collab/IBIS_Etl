@@ -77,7 +77,7 @@ class DataValidator:
     _NAME_FIELD = 'participants_name'
 
     # Minimum similarity ratio (0–1) for two names to be flagged as related.
-    _NAME_SIMILARITY_THRESHOLD = 0.85
+    _NAME_SIMILARITY_THRESHOLD = 0.90
 
     # Maps lowercase country name to the expected screening_id prefix.
     _COUNTRY_ID_PREFIXES: dict[str, str] = {
