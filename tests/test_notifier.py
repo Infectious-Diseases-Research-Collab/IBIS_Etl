@@ -1,10 +1,11 @@
 from __future__ import annotations
 
+import smtplib
 import pandas as pd
 import pytest
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock, patch, call
 from cryptography.fernet import Fernet
-from modules.notifier import _load_smtp_credentials, _should_notify, _query_validation_report, _build_stage_summary, _build_validation_section
+from modules.notifier import _load_smtp_credentials, _should_notify, _query_validation_report, _build_stage_summary, _build_validation_section, send_pipeline_report
 from stages.base import StageResult
 
 
@@ -142,3 +143,97 @@ def test_build_validation_section_truncates_ids():
     })
     text = _build_validation_section(report)
     assert '… and 5 more' in text
+
+
+def _make_email_cfg(tmp_path):
+    """Build a minimal email config with real Fernet credentials."""
+    key = Fernet.generate_key()
+    cipher = Fernet(key)
+    key_file = tmp_path / 'smtp.key'
+    ini_file = tmp_path / 'smtp.ini'
+    key_file.write_text(key.decode())
+    ini_file.write_text(
+        f"Username={cipher.encrypt(b'user@example.com').decode()}\n"
+        f"Password={cipher.encrypt(b's3cr3t').decode()}\n"
+    )
+    return {
+        'smtp_host': 'smtp.example.com',
+        'smtp_port': 587,
+        'sender': 'ibis@example.com',
+        'recipients': ['dm@example.com', 'pi@example.com'],
+        'keyfiles': {
+            'smtp_ini': str(ini_file),
+            'smtp_key': str(key_file),
+        },
+    }
+
+
+class _FakeConfig:
+    def __init__(self, email_cfg):
+        self._email_cfg = email_cfg
+
+    def get(self, key, default=None):
+        return self._email_cfg if key == 'email' else default
+
+
+def test_send_pipeline_report_no_config_is_silent():
+    """No email config → function returns without error."""
+    config = _FakeConfig(None)
+    send_pipeline_report(
+        results={'mdb_to_bronze': StageResult(success=False)},
+        stages=['mdb_to_bronze'],
+        engine=MagicMock(),
+        config=config,
+    )
+    # No exception = pass
+
+
+def test_send_pipeline_report_clean_run_no_email(tmp_path):
+    """Clean run with no ERRORs → no email sent."""
+    config = _FakeConfig(_make_email_cfg(tmp_path))
+    results = {'mdb_to_bronze': StageResult(success=True)}
+    report = pd.DataFrame({'severity': ['WARNING'], 'check': ['a']})
+
+    with patch('modules.notifier._query_validation_report', return_value=report):
+        with patch('smtplib.SMTP') as mock_smtp:
+            send_pipeline_report(
+                results=results, stages=['mdb_to_bronze'],
+                engine=MagicMock(), config=config,
+            )
+    mock_smtp.assert_not_called()
+
+
+def test_send_pipeline_report_sends_on_failure(tmp_path):
+    """Stage failure → email is sent to all recipients."""
+    config = _FakeConfig(_make_email_cfg(tmp_path))
+    results = {'mdb_to_bronze': StageResult(success=False, errors=['boom'])}
+
+    mock_smtp_instance = MagicMock()
+    with patch('modules.notifier._query_validation_report', return_value=None):
+        with patch('smtplib.SMTP', return_value=mock_smtp_instance) as mock_smtp_cls:
+            mock_smtp_cls.return_value.__enter__ = lambda s: mock_smtp_instance
+            mock_smtp_cls.return_value.__exit__ = MagicMock(return_value=False)
+            send_pipeline_report(
+                results=results, stages=['mdb_to_bronze'],
+                engine=MagicMock(), config=config,
+            )
+
+    mock_smtp_instance.starttls.assert_called_once()
+    mock_smtp_instance.login.assert_called_once_with('user@example.com', 's3cr3t')
+    sendmail_args = mock_smtp_instance.sendmail.call_args
+    assert 'dm@example.com' in sendmail_args[0][1]
+    assert 'pi@example.com' in sendmail_args[0][1]
+
+
+def test_send_pipeline_report_does_not_raise_on_smtp_error(tmp_path):
+    """SMTP failure is logged and swallowed — pipeline is unaffected."""
+    config = _FakeConfig(_make_email_cfg(tmp_path))
+    results = {'mdb_to_bronze': StageResult(success=False)}
+
+    with patch('modules.notifier._query_validation_report', return_value=None):
+        with patch('smtplib.SMTP', side_effect=smtplib.SMTPException('conn refused')):
+            # Must not raise
+            send_pipeline_report(
+                results=results, stages=['mdb_to_bronze'],
+                engine=MagicMock(), config=config,
+            )
