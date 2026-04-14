@@ -9,6 +9,7 @@ from modules.config import ConfigLoader
 from modules.db import create_db_engine, init_schemas
 from stages.base import StageResult
 
+from stages.ftp_to_extracted import FtpToExtracted
 from stages.mdb_to_bronze import MdbToBronze
 from stages.bronze_to_silver import BronzeToSilver
 from stages.transform_ibis import TransformIbis
@@ -23,6 +24,7 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 STAGE_CLASSES = {
+    'ftp_to_extracted': FtpToExtracted,
     'mdb_to_bronze':    MdbToBronze,
     'bronze_to_silver': BronzeToSilver,
     'transform_ibis':   TransformIbis,
