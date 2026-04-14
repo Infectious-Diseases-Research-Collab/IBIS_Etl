@@ -3,7 +3,7 @@ from __future__ import annotations
 import smtplib
 import pandas as pd
 import pytest
-from unittest.mock import MagicMock, patch, call
+from unittest.mock import patch, MagicMock
 from cryptography.fernet import Fernet
 from modules.notifier import _load_smtp_credentials, _should_notify, _query_validation_report, _build_stage_summary, _build_validation_section, send_pipeline_report
 from stages.base import StageResult
@@ -210,9 +210,8 @@ def test_send_pipeline_report_sends_on_failure(tmp_path):
 
     mock_smtp_instance = MagicMock()
     with patch('modules.notifier._query_validation_report', return_value=None):
-        with patch('smtplib.SMTP', return_value=mock_smtp_instance) as mock_smtp_cls:
-            mock_smtp_cls.return_value.__enter__ = lambda s: mock_smtp_instance
-            mock_smtp_cls.return_value.__exit__ = MagicMock(return_value=False)
+        with patch('smtplib.SMTP') as mock_smtp_cls:
+            mock_smtp_cls.return_value.__enter__.return_value = mock_smtp_instance
             send_pipeline_report(
                 results=results, stages=['mdb_to_bronze'],
                 engine=MagicMock(), config=config,
@@ -221,8 +220,8 @@ def test_send_pipeline_report_sends_on_failure(tmp_path):
     mock_smtp_instance.starttls.assert_called_once()
     mock_smtp_instance.login.assert_called_once_with('user@example.com', 's3cr3t')
     sendmail_args = mock_smtp_instance.sendmail.call_args
-    assert 'dm@example.com' in sendmail_args[0][1]
-    assert 'pi@example.com' in sendmail_args[0][1]
+    recipients_arg = sendmail_args[0][1]
+    assert set(recipients_arg) == {'dm@example.com', 'pi@example.com'}
 
 
 def test_send_pipeline_report_does_not_raise_on_smtp_error(tmp_path):

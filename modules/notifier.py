@@ -147,6 +147,7 @@ def _build_body(
 
 
 def _send(email_cfg: dict, subject: str, plain: str, html: str) -> None:
+    """Assemble a multipart email and send it via SMTP with STARTTLS."""
     ini_path = email_cfg['keyfiles']['smtp_ini']
     key_path = email_cfg['keyfiles']['smtp_key']
     username, password = _load_smtp_credentials(ini_path, key_path)
@@ -173,19 +174,29 @@ def send_pipeline_report(
     """
     Send an email summary of the pipeline run if any stage failed or validation
     ERRORs exist. Silently returns if no email config is present or the run is clean.
-    Never raises — SMTP errors are logged and swallowed.
+    The SMTP call is wrapped in try/except so network errors never kill the pipeline.
     """
     email_cfg = config.get('email')
     if not email_cfg:
         return
+
+    # Query once — used for both trigger check and email body
+    report_df = _query_validation_report(engine)
+
+    has_failures = any(not r.success for r in results.values())
+    has_errors = (
+        report_df is not None
+        and not report_df.empty
+        and (report_df['severity'] == 'ERROR').any()
+    )
+    if not has_failures and not has_errors:
+        logger.info('Notifier: clean run — no email sent.')
+        return
+
+    today = date.today().strftime('%d %b %Y')
+    subject = f'IBIS Pipeline \u2014 Issues found ({today})'
+    plain, html = _build_body(results, stages, report_df)
     try:
-        if not _should_notify(results, engine):
-            logger.info('Notifier: clean run — no email sent.')
-            return
-        report_df = _query_validation_report(engine)
-        today = date.today().strftime('%d %b %Y')
-        subject = f'IBIS Pipeline \u2014 Issues found ({today})'
-        plain, html = _build_body(results, stages, report_df)
         _send(email_cfg, subject, plain, html)
         logger.info(f'Pipeline report sent to {email_cfg["recipients"]}.')
     except Exception as exc:
