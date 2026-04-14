@@ -4,7 +4,7 @@ import pandas as pd
 import pytest
 from unittest.mock import MagicMock, patch
 from cryptography.fernet import Fernet
-from modules.notifier import _load_smtp_credentials, _should_notify
+from modules.notifier import _load_smtp_credentials, _should_notify, _query_validation_report
 from stages.base import StageResult
 
 
@@ -78,3 +78,9 @@ def test_should_notify_false_when_report_is_none():
     results = {'mdb_to_bronze': StageResult(success=True)}
     with patch('modules.notifier._query_validation_report', return_value=None):
         assert _should_notify(results, MagicMock()) is False
+
+
+def test_query_validation_report_returns_none_on_db_error():
+    with patch('pandas.read_sql', side_effect=Exception('connection refused')):
+        result = _query_validation_report(MagicMock())
+    assert result is None
