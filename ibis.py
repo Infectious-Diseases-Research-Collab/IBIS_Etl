@@ -17,6 +17,8 @@ from stages.measures_ibis import MeasuresIbis
 from stages.promote_ibis import PromoteIbis
 from stages.store_ibis import StoreIbis
 
+from modules.notifier import send_pipeline_report
+
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s [%(levelname)s] %(name)s - %(message)s',
@@ -103,6 +105,7 @@ def run_pipeline(stages: list[str], config: ConfigLoader, engine) -> None:
             logger.info(f"  [{name}] OK — {result.rows_written} row(s) written.")
 
     _log_summary(results, failed)
+    send_pipeline_report(results=results, stages=stages, engine=engine, config=config)
     if failed:
         sys.exit(1)
 
