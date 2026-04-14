@@ -48,41 +48,46 @@ class FtpToExtracted(BaseStage):
                 os.makedirs(download_dir, exist_ok=True)
                 os.makedirs(extract_dir, exist_ok=True)
 
+                # List files with a short-lived connection, then close it.
                 with SFTPClient(hostname, username, ftp_password) as sftp:
                     filenames = sftp.list_files(remote_path)
-                    latest = select_latest_remote_per_tablet(filenames)
-                    logger.info(
-                        f"[{country}] {len(latest)} latest archive(s) found on FTP."
-                    )
 
-                    for tablet_id, filename in sorted(latest.items()):
-                        folder_name = filename[:-3]  # strip .7z
-                        tablet_extract_dir = os.path.join(extract_dir, folder_name)
+                latest = select_latest_remote_per_tablet(filenames)
+                logger.info(
+                    f"[{country}] {len(latest)} latest archive(s) found on FTP."
+                )
 
-                        if os.path.exists(tablet_extract_dir):
-                            logger.info(
-                                f"[{country}] Skipping {filename} — already extracted."
-                            )
-                            continue
+                for tablet_id, filename in sorted(latest.items()):
+                    folder_name = filename[:-3]  # strip .7z
+                    tablet_extract_dir = os.path.join(extract_dir, folder_name)
 
-                        local_archive = os.path.join(download_dir, filename)
-                        try:
+                    if os.path.exists(tablet_extract_dir):
+                        logger.info(
+                            f"[{country}] Skipping {filename} — already extracted."
+                        )
+                        continue
+
+                    local_archive = os.path.join(download_dir, filename)
+                    try:
+                        # Fresh connection per tablet — avoids server dropping
+                        # a long-running session mid-batch (Mismatched MAC).
+                        with SFTPClient(hostname, username, ftp_password) as sftp:
                             sftp.download_file(remote_path + filename, local_archive)
-                            with py7zr.SevenZipFile(
-                                local_archive, mode='r', password=sevenz_password
-                            ) as archive:
-                                archive.extractall(path=extract_dir)
+                        with py7zr.SevenZipFile(
+                            local_archive, mode='r', password=sevenz_password
+                        ) as archive:
+                            archive.extractall(path=extract_dir)
+                        os.remove(local_archive)
+                        logger.info(
+                            f"[{country}] Extracted {filename} → {tablet_extract_dir}"
+                        )
+                        total_downloaded += 1
+                    except Exception as exc:
+                        msg = f"[{country}] Failed to process '{filename}': {exc}"
+                        logger.error(msg)
+                        errors.append(msg)
+                        if os.path.exists(local_archive):
                             os.remove(local_archive)
-                            logger.info(
-                                f"[{country}] Extracted {filename} → {tablet_extract_dir}"
-                            )
-                            total_downloaded += 1
-                        except Exception as exc:
-                            msg = f"[{country}] Failed to process '{filename}': {exc}"
-                            logger.error(msg)
-                            errors.append(msg)
-                            if os.path.exists(local_archive):
-                                os.remove(local_archive)
 
             except Exception as exc:
                 msg = f"[{country}] SFTP connection failed: {exc}"
