@@ -25,7 +25,7 @@ _DATETIME_COERCE_COLS = {
     'sms_schedule_8weeks', 'sms_schedule_11weeks',
     'dflt_appt_arm_schd_appt_date',
 }
-_NUMERIC_COERCE_COLS = {'age'}
+_NUMERIC_COERCE_COLS: set[str] = set()  # 'age' is always empty — age data is in respondants_age
 
 _MDB_EXPORT_TIMEOUT = 60   # seconds — table export
 _MDB_TABLES_TIMEOUT = 10   # seconds — listing tables is fast
@@ -38,7 +38,7 @@ def read_mdb_table(db_path: str, table_name: str) -> pd.DataFrame:
     """
     try:
         result = subprocess.run(
-            ['mdb-export', db_path, table_name],
+            ['mdb-export', '-T', '%d/%m/%Y %H:%M:%S', db_path, table_name],
             capture_output=True,
             text=True,
             timeout=_MDB_EXPORT_TIMEOUT,

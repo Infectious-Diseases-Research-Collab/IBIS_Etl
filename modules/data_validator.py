@@ -28,8 +28,9 @@ Validation checks performed
 19. Client sex coding (invalid code, missing for consented participants).
 20. Interviewer productivity (excessive daily interviews, unusual hours).
 21. Screening ID format and country-prefix correctness.
-22. Tablet record counts (tablets with suspiciously few records).
-23. Overall record completeness (columns with high null rates).
+22. Health facility code validity (codes must match the country's valid set).
+23. Tablet record counts (tablets with suspiciously few records).
+24. Overall record completeness (columns with high null rates).
 
 Usage
 ~~~~~
@@ -88,6 +89,26 @@ class DataValidator:
     # Valid format for a screening ID: alphanumeric, hyphens, underscores only.
     _SCREENING_ID_RE = re.compile(r'^[A-Za-z0-9_\-]+$')
 
+    # Health facility code → label mappings (from the data dictionary).
+    _FACILITY_CODES_KE: dict[int, str] = {
+        21: 'Homa Bay Teaching and Referral Hospital',
+        22: 'Rachuonyo District Hospital',
+        23: 'Suba District Hospital',
+        24: 'Ndhiwa District Hospital',
+        99: 'Other',
+    }
+    _FACILITY_CODES_UG: dict[int, str] = {
+        11: 'Bushenyi HCIV',
+        12: 'Ishaka Adventist Hospital (Bushenyi)',
+        13: 'Ishongororo HCIV (Ibanda)',
+        14: 'Ruhoko HCIV (Ibanda)',
+        99: 'Other',
+    }
+
+    # Columns excluded from sparse_column check — known to be intentionally empty
+    # (e.g. vdate mirrors starttime and is never independently populated).
+    _COMPLETENESS_EXCLUDE: set[str] = {'vdate', 'age'}
+
     def __init__(self, system_skip_code: int = _SYSTEM_SKIP):
         self.skip_code = system_skip_code
 
@@ -100,24 +121,29 @@ class DataValidator:
         df: pd.DataFrame,
         country_code: Optional[int] = None,
         country_name: str = '',
+        site_name: str = '',
     ) -> pd.DataFrame:
         """
-        Run all 23 validation checks and return a quality-report DataFrame.
+        Run all 24 validation checks and return a quality-report DataFrame.
 
         Each row in the report represents one issue found.  Columns:
             check            - name of the validation check
             severity         - 'ERROR' or 'WARNING'
+            country          - country the records belong to
+            site             - community/site the records belong to
             field            - the column that triggered the issue (if applicable)
             record_count     - number of affected records
             detail           - human-readable description
             affected_subjids - semicolon-separated subjids (or screening_ids) of
                                the specific records involved, where applicable
+            affected_tablets - comma-separated tablet numbers of the affected rows
         """
         issues: list[dict] = []
 
         issues += self._check_required_fields(df)
         issues += self._check_age(df)
         issues += self._check_cross_country_fields(df)
+        issues += self._check_health_facility_codes(df)
         issues += self._check_duplicate_uniqueid(df)
         issues += self._check_duplicate_screening_id(df)
         issues += self._check_consent_without_subjid(df)
@@ -148,10 +174,17 @@ class DataValidator:
         issues += self._check_tablet_record_counts(df)
         issues += self._check_record_completeness(df)
 
+        for issue in issues:
+            issue.setdefault('country', country_name)
+            issue.setdefault('site', site_name)
+            issue.setdefault('affected_tablets', '')
+
         report = pd.DataFrame(issues, columns=[
-            'check', 'severity', 'field', 'record_count', 'detail', 'affected_subjids'
+            'check', 'severity', 'country', 'site', 'field', 'record_count',
+            'detail', 'affected_subjids', 'affected_tablets',
         ])
         report['affected_subjids'] = report['affected_subjids'].fillna('')
+        report['affected_tablets'] = report['affected_tablets'].fillna('')
         total_errors = (report['severity'] == 'ERROR').sum()
         total_warnings = (report['severity'] == 'WARNING').sum()
         logger.info(
@@ -229,6 +262,48 @@ class DataValidator:
 
         return ''
 
+    @staticmethod
+    def _parse_dob(series: pd.Series) -> pd.Series:
+        """
+        Parse a DOB column and correct 2-digit year ambiguity.
+
+        Access/mdbtools exports dates as MM/DD/YY.  Python's dateutil maps
+        years 00-49 to 2000-2049, so participants born in e.g. 1940 appear as
+        2040.  Any parsed date that is in the future but becomes a plausible
+        DOB (age 10-110) when shifted back 100 years is corrected automatically.
+        """
+        dob = pd.to_datetime(series, errors='coerce', format='%d/%m/%Y %H:%M:%S')
+        today = pd.Timestamp.now().normalize()
+        future_mask = dob.notna() & (dob > today)
+        if not future_mask.any():
+            return dob
+
+        dob = dob.copy()
+        future_idx = dob[future_mask].index
+        corrected = dob.loc[future_idx].map(
+            lambda d: d.replace(year=d.year - 100) if not pd.isna(d) else d
+        )
+        min_dob = today - pd.DateOffset(years=110)
+        max_dob = today - pd.DateOffset(years=10)
+        valid = (corrected >= min_dob) & (corrected <= max_dob)
+        dob.loc[corrected[valid].index] = corrected[valid]
+        return dob
+
+    def _tablets_for_mask(self, df: pd.DataFrame, mask) -> str:
+        """Return a comma-separated sorted string of unique tablet numbers
+        for the rows identified by *mask* (boolean Series or Index)."""
+        try:
+            subset = df.loc[mask]
+        except Exception:  # noqa: BLE001
+            return ''
+        if 'tabletnum' not in subset.columns:
+            return ''
+        tablets = subset['tabletnum'].dropna().map(self._strip_float_suffix)
+        tablets = tablets[tablets != '']
+        if tablets.empty:
+            return ''
+        return ', '.join(sorted(tablets.unique().tolist()))
+
     # ------------------------------------------------------------------
     # Individual checks
     # ------------------------------------------------------------------
@@ -244,6 +319,7 @@ class DataValidator:
                     record_count=len(df),
                     detail=f"Column '{fname}' is absent from the dataset.",
                     affected_subjids='',
+                    affected_tablets='',
                 ))
                 continue
             null_mask = df[fname].isna()
@@ -258,6 +334,7 @@ class DataValidator:
                     record_count=total_missing,
                     detail=f"{total_missing} record(s) have no value for required field '{fname}'.",
                     affected_subjids=self._subjids_for_mask(df, missing_mask),
+                    affected_tablets=self._tablets_for_mask(df, missing_mask),
                 ))
         return issues
 
@@ -277,8 +354,18 @@ class DataValidator:
                 record_count=int(len(bad)),
                 detail=f"{len(bad)} record(s) have age outside 10-110 (or -7): {bad_vals}.",
                 affected_subjids=self._subjids_for_mask(df, bad.index),
+                affected_tablets=self._tablets_for_mask(df, bad.index),
             ))
         return issues
+
+    @staticmethod
+    def _decode_facility_codes(series: pd.Series, code_map: dict) -> list[str]:
+        """Return a sorted list of 'code (Name)' strings for unique non-null values."""
+        codes = pd.to_numeric(series, errors='coerce').dropna().unique()
+        decoded = sorted(
+            f"{int(c)} ({code_map.get(int(c), 'Unknown')})" for c in codes
+        )
+        return decoded
 
     def _check_cross_country_fields(self, df: pd.DataFrame) -> list[dict]:
         """Kenya records (countrycode=2) should have -9 in health_facility_ug,
@@ -291,6 +378,9 @@ class DataValidator:
             ug_fac = pd.to_numeric(ke_rows['health_facility_ug'], errors='coerce')
             contaminated = ke_rows[ug_fac.notna() & (ug_fac != self.skip_code)]
             if not contaminated.empty:
+                decoded = self._decode_facility_codes(
+                    contaminated['health_facility_ug'], self._FACILITY_CODES_UG
+                )
                 issues.append(dict(
                     check='cross_country_facility',
                     severity='WARNING',
@@ -298,9 +388,10 @@ class DataValidator:
                     record_count=int(len(contaminated)),
                     detail=(
                         f"{len(contaminated)} Kenya record(s) have a non-skip value "
-                        f"in health_facility_ug."
+                        f"in health_facility_ug: {decoded}"
                     ),
                     affected_subjids=self._subjids_for_mask(df, contaminated.index),
+                    affected_tablets=self._tablets_for_mask(df, contaminated.index),
                 ))
 
         ug_rows = df[country_col == 1]
@@ -308,6 +399,9 @@ class DataValidator:
             ke_fac = pd.to_numeric(ug_rows['health_facility_ke'], errors='coerce')
             contaminated = ug_rows[ke_fac.notna() & (ke_fac != self.skip_code)]
             if not contaminated.empty:
+                decoded = self._decode_facility_codes(
+                    contaminated['health_facility_ke'], self._FACILITY_CODES_KE
+                )
                 issues.append(dict(
                     check='cross_country_facility',
                     severity='WARNING',
@@ -315,9 +409,51 @@ class DataValidator:
                     record_count=int(len(contaminated)),
                     detail=(
                         f"{len(contaminated)} Uganda record(s) have a non-skip value "
-                        f"in health_facility_ke."
+                        f"in health_facility_ke: {decoded}"
                     ),
                     affected_subjids=self._subjids_for_mask(df, contaminated.index),
+                    affected_tablets=self._tablets_for_mask(df, contaminated.index),
+                ))
+        return issues
+
+    def _check_health_facility_codes(self, df: pd.DataFrame) -> list[dict]:
+        """
+        Validate that each record's health facility code is within the expected
+        set for its country.  Kenya records use health_facility_ke (codes 21-24, 99),
+        Uganda records use health_facility_ug (codes 11-14, 99).
+        """
+        issues = []
+        country_col = pd.to_numeric(df.get('countrycode'), errors='coerce')
+        valid_skip = {self.skip_code}
+
+        checks = [
+            (2, 'health_facility_ke', self._FACILITY_CODES_KE, 'Kenya'),
+            (1, 'health_facility_ug', self._FACILITY_CODES_UG, 'Uganda'),
+        ]
+        for cc, field, code_map, label in checks:
+            if field not in df.columns:
+                continue
+            rows = df[country_col == cc]
+            if rows.empty:
+                continue
+            fac = pd.to_numeric(rows[field], errors='coerce')
+            valid_codes = set(code_map.keys()) | valid_skip
+            # Null / unparseable values are skipped (caught by required-field check)
+            bad = rows[fac.notna() & ~fac.isin(valid_codes)]
+            if not bad.empty:
+                bad_decoded = self._decode_facility_codes(bad[field], code_map)
+                issues.append(dict(
+                    check='invalid_facility_code',
+                    severity='ERROR',
+                    field=field,
+                    record_count=int(len(bad)),
+                    detail=(
+                        f"{len(bad)} {label} record(s) have an unrecognised "
+                        f"{field} code: {bad_decoded}. "
+                        f"Valid codes: {sorted(code_map.keys())}."
+                    ),
+                    affected_subjids=self._subjids_for_mask(df, bad.index),
+                    affected_tablets=self._tablets_for_mask(df, bad.index),
                 ))
         return issues
 
@@ -342,6 +478,7 @@ class DataValidator:
                     f"Likely caused by overlapping archive snapshots."
                 ),
                 affected_subjids=self._subjids_for_mask(df, uid_col[dup_mask].index),
+                affected_tablets=self._tablets_for_mask(df, uid_col[dup_mask].index),
             ))
         return issues
 
@@ -367,6 +504,7 @@ class DataValidator:
                     f"archive overlap."
                 ),
                 affected_subjids=self._subjids_for_mask(df, sid_col[dup_mask].index),
+                affected_tablets=self._tablets_for_mask(df, sid_col[dup_mask].index),
             ))
         return issues
 
@@ -404,6 +542,7 @@ class DataValidator:
                     f"indicates declined/ineligible and is excluded from this check."
                 ),
                 affected_subjids=self._subjids_for_mask(df, missing_subj.index),
+                affected_tablets=self._tablets_for_mask(df, missing_subj.index),
             ))
         return issues
 
@@ -421,6 +560,7 @@ class DataValidator:
                 record_count=int(null_count),
                 detail=f"{null_count} record(s) have no interviewer_id.",
                 affected_subjids=self._subjids_for_mask(df, null_mask),
+                affected_tablets=self._tablets_for_mask(df, null_mask),
             ))
         return issues
 
@@ -445,6 +585,7 @@ class DataValidator:
                     f"These are cross-country contaminated records."
                 ),
                 affected_subjids=self._subjids_for_mask(df, mismatched.index),
+                affected_tablets=self._tablets_for_mask(df, mismatched.index),
             ))
         return issues
 
@@ -485,6 +626,7 @@ class DataValidator:
                 f"Examples: {examples}"
             ),
             affected_subjids=self._subjids_for_mask(df, col[dup_mask].index),
+            affected_tablets=self._tablets_for_mask(df, col[dup_mask].index),
         )]
 
     def _check_duplicate_phone(self, df: pd.DataFrame) -> list[dict]:
@@ -514,6 +656,7 @@ class DataValidator:
                 f"Examples: {examples}"
             ),
             affected_subjids=self._subjids_for_mask(df, normalised[dup_mask].index),
+            affected_tablets=self._tablets_for_mask(df, normalised[dup_mask].index),
         )]
 
     def _check_similar_phones(self, df: pd.DataFrame) -> list[dict]:
@@ -578,6 +721,7 @@ class DataValidator:
                 f"one digit (possible transposition or typo)."
             ),
             affected_subjids=self._subjids_for_mask(df, affected_idx_unique),
+            affected_tablets=self._tablets_for_mask(df, affected_idx_unique),
         )]
 
     def _check_duplicate_name(self, df: pd.DataFrame) -> list[dict]:
@@ -595,17 +739,34 @@ class DataValidator:
         dup_mask = normalised.duplicated(keep=False)
         if not dup_mask.any():
             return []
+        has_dob = 'dob' in df.columns
+        if has_dob:
+            dob_parsed = self._parse_dob(df['dob']).dt.normalize()
+
         issues = []
         for name in sorted(normalised[dup_mask].unique()):
             name_mask = normalised == name
             count = int(name_mask.sum())
+            matched_idx = name_mask.index[name_mask]
+
+            if has_dob:
+                dobs = dob_parsed.loc[matched_idx].dropna()
+                unique_dobs = sorted(str(d.date()) for d in dobs.unique())
+                # Different DOBs → different people sharing a name — not a data issue
+                if len(unique_dobs) > 1:
+                    continue
+                dob_note = f" | DOB: {unique_dobs[0]}" if unique_dobs else ''
+            else:
+                dob_note = ''
+
             issues.append(dict(
                 check='duplicate_name',
                 severity='WARNING',
                 field=self._NAME_FIELD,
                 record_count=count,
-                detail=f"{count} record(s) share the name '{name}'.",
-                affected_subjids=self._subjids_for_mask(df, name_mask.index[name_mask]),
+                detail=f"{count} record(s) share the name '{name}'{dob_note}.",
+                affected_subjids=self._subjids_for_mask(df, matched_idx),
+                affected_tablets=self._tablets_for_mask(df, matched_idx),
             ))
         return issues
 
@@ -661,7 +822,7 @@ class DataValidator:
         # Pre-compute normalised DOB (date only) for each index so we can
         # filter pairs to those where both records share the same DOB.
         if has_dob:
-            dob_series = pd.to_datetime(df['dob'], errors='coerce', format='mixed').dt.normalize()
+            dob_series = self._parse_dob(df['dob']).dt.normalize()
         else:
             dob_series = None
 
@@ -677,7 +838,7 @@ class DataValidator:
                 dob_b = dob_series.get(idx_b)
                 if pd.isna(dob_a) or pd.isna(dob_b) or dob_a != dob_b:
                     continue
-                dob_note = f" | DOB: {dob_a.date()}"
+                dob_note = f" | DOB A: {dob_a.date()} | DOB B: {dob_b.date()}"
             else:
                 dob_note = ''
 
@@ -698,6 +859,7 @@ class DataValidator:
                     f"(similarity={sim:.2f}){dob_note}{tablet_note}"
                 ),
                 affected_subjids=self._subjids_for_mask(df, [idx_a, idx_b]),
+                affected_tablets=self._tablets_for_mask(df, [idx_a, idx_b]),
             ))
         return issues
 
@@ -714,8 +876,8 @@ class DataValidator:
         if 'starttime' not in df.columns or 'stoptime' not in df.columns:
             return issues
 
-        start = pd.to_datetime(df['starttime'], errors='coerce', format='mixed')
-        stop = pd.to_datetime(df['stoptime'], errors='coerce', format='mixed')
+        start = pd.to_datetime(df['starttime'], errors='coerce', format='%d/%m/%Y %H:%M:%S')
+        stop = pd.to_datetime(df['stoptime'], errors='coerce', format='%d/%m/%Y %H:%M:%S')
         both_valid = start.notna() & stop.notna()
         delta_minutes = (stop - start).dt.total_seconds() / 60
 
@@ -732,9 +894,11 @@ class DataValidator:
                     f"(negative duration). Examples: {examples}"
                 ),
                 affected_subjids=self._subjids_for_mask(df, impossible),
+                affected_tablets=self._tablets_for_mask(df, impossible),
             ))
 
-        too_short = both_valid & (delta_minutes >= 0) & (delta_minutes < 3)
+        enrolled = df['subjid'].notna() & (df['subjid'].astype(str).str.strip() != '')
+        too_short = both_valid & (delta_minutes >= 0) & (delta_minutes < 3) & enrolled
         if too_short.any():
             examples = [f"{m:.1f} min" for m in delta_minutes[too_short].head(5)]
             issues.append(dict(
@@ -748,6 +912,7 @@ class DataValidator:
                     f"Examples: {examples}"
                 ),
                 affected_subjids=self._subjids_for_mask(df, too_short),
+                affected_tablets=self._tablets_for_mask(df, too_short),
             ))
 
         too_long = both_valid & (delta_minutes > 240)
@@ -764,6 +929,7 @@ class DataValidator:
                     f"Examples: {examples}"
                 ),
                 affected_subjids=self._subjids_for_mask(df, too_long),
+                affected_tablets=self._tablets_for_mask(df, too_long),
             ))
 
         return issues
@@ -778,7 +944,7 @@ class DataValidator:
             return issues
 
         today = pd.Timestamp.now().normalize()
-        dob = pd.to_datetime(df['dob'], errors='coerce', format='mixed')
+        dob = self._parse_dob(df['dob'])
         valid_dob = dob.notna()
 
         future = valid_dob & (dob > today)
@@ -794,6 +960,7 @@ class DataValidator:
                     f"Examples: {examples}"
                 ),
                 affected_subjids=self._subjids_for_mask(df, future),
+                affected_tablets=self._tablets_for_mask(df, future),
             ))
 
         derived_age = (today - dob).dt.days / 365.25
@@ -814,6 +981,7 @@ class DataValidator:
                     f"Examples: {examples}"
                 ),
                 affected_subjids=self._subjids_for_mask(df, ineligible),
+                affected_tablets=self._tablets_for_mask(df, ineligible),
             ))
 
         if 'respondants_age' in df.columns:
@@ -837,46 +1005,48 @@ class DataValidator:
                         f"Examples: {examples}"
                     ),
                     affected_subjids=self._subjids_for_mask(df, mismatch),
+                affected_tablets=self._tablets_for_mask(df, mismatch),
                 ))
 
         return issues
 
     def _check_visit_date(self, df: pd.DataFrame) -> list[dict]:
         """
-        Check for future visit dates, stale visit dates (> 12 months ago),
-        and visit dates that don't match the calendar date of starttime.
+        Check for future or stale visit dates using starttime.
+        vdate mirrors starttime and is not checked separately.
         """
         issues = []
-        if 'vdate' not in df.columns:
+        if 'starttime' not in df.columns:
             return issues
 
         today = pd.Timestamp.now().normalize()
         stale_cutoff = today - pd.DateOffset(months=12)
-        vdate = pd.to_datetime(df['vdate'], errors='coerce')
-        valid_vdate = vdate.notna()
+        start = pd.to_datetime(df['starttime'], errors='coerce', format='%d/%m/%Y %H:%M:%S')
+        valid_start = start.notna()
 
-        future = valid_vdate & (vdate > today)
+        future = valid_start & (start.dt.normalize() > today)
         if future.any():
-            examples = [str(d.date()) for d in vdate[future].dropna().head(5)]
+            examples = [str(d.date()) for d in start[future].dropna().head(5)]
             issues.append(dict(
                 check='future_visit_date',
                 severity='ERROR',
-                field='vdate',
+                field='starttime',
                 record_count=int(future.sum()),
                 detail=(
                     f"{future.sum()} record(s) have a visit date in the future. "
                     f"Examples: {examples}"
                 ),
                 affected_subjids=self._subjids_for_mask(df, future),
+                affected_tablets=self._tablets_for_mask(df, future),
             ))
 
-        stale = valid_vdate & (vdate < stale_cutoff)
+        stale = valid_start & (start.dt.normalize() < stale_cutoff)
         if stale.any():
-            examples = [str(d.date()) for d in vdate[stale].dropna().head(5)]
+            examples = [str(d.date()) for d in start[stale].dropna().head(5)]
             issues.append(dict(
                 check='stale_visit_date',
                 severity='WARNING',
-                field='vdate',
+                field='starttime',
                 record_count=int(stale.sum()),
                 detail=(
                     f"{stale.sum()} record(s) have a visit date more than "
@@ -884,25 +1054,8 @@ class DataValidator:
                     f"Examples: {examples}"
                 ),
                 affected_subjids=self._subjids_for_mask(df, stale),
+                affected_tablets=self._tablets_for_mask(df, stale),
             ))
-
-        if 'starttime' in df.columns:
-            start = pd.to_datetime(df['starttime'], errors='coerce', format='mixed')
-            both = valid_vdate & start.notna()
-            date_mismatch = both & (vdate.dt.normalize() != start.dt.normalize())
-            if date_mismatch.any():
-                issues.append(dict(
-                    check='vdate_starttime_mismatch',
-                    severity='WARNING',
-                    field='vdate',
-                    record_count=int(date_mismatch.sum()),
-                    detail=(
-                        f"{date_mismatch.sum()} record(s) have a visit date (vdate) "
-                        f"that does not match the calendar date of starttime — "
-                        f"possible backdating."
-                    ),
-                    affected_subjids=self._subjids_for_mask(df, date_mismatch),
-                ))
 
         return issues
 
@@ -910,15 +1063,15 @@ class DataValidator:
         """
         Check that follow-up appointment dates are after the visit date and
         fall within a clinically plausible window.
-          next_appt_3m : 60–120 days after vdate
-          next_appt_6m : 150–210 days after vdate
+          next_appt_3m : 60–120 days after starttime
+          next_appt_6m : 150–210 days after starttime
         """
         issues = []
-        if 'vdate' not in df.columns:
+        if 'starttime' not in df.columns:
             return issues
 
-        vdate = pd.to_datetime(df['vdate'], errors='coerce')
-        valid_vdate = vdate.notna()
+        visit = pd.to_datetime(df['starttime'], errors='coerce', format='%d/%m/%Y %H:%M:%S')
+        valid_visit = visit.notna()
 
         appt_windows = {
             'next_appt_3m': (60, 120),
@@ -929,10 +1082,10 @@ class DataValidator:
             if col not in df.columns:
                 continue
 
-            appt = pd.to_datetime(df[col], errors='coerce', format='mixed')
-            both = valid_vdate & appt.notna()
+            appt = pd.to_datetime(df[col], errors='coerce', format='%d/%m/%Y %H:%M:%S')
+            both = valid_visit & appt.notna()
 
-            before_visit = both & (appt < vdate)
+            before_visit = both & (appt < visit)
             if before_visit.any():
                 issues.append(dict(
                     check='appointment_before_visit',
@@ -941,12 +1094,13 @@ class DataValidator:
                     record_count=int(before_visit.sum()),
                     detail=(
                         f"{before_visit.sum()} record(s) have '{col}' earlier than "
-                        f"vdate — appointment cannot precede the visit."
+                        f"starttime — appointment cannot precede the visit."
                     ),
                     affected_subjids=self._subjids_for_mask(df, before_visit),
+                    affected_tablets=self._tablets_for_mask(df, before_visit),
                 ))
 
-            delta_days = (appt - vdate).dt.days
+            delta_days = (appt - visit).dt.days
             outside_window = both & ~before_visit & (
                 (delta_days < min_days) | (delta_days > max_days)
             )
@@ -958,9 +1112,10 @@ class DataValidator:
                     record_count=int(outside_window.sum()),
                     detail=(
                         f"{outside_window.sum()} record(s) have '{col}' outside "
-                        f"the expected {min_days}-{max_days} day window after vdate."
+                        f"the expected {min_days}-{max_days} day window after starttime."
                     ),
                     affected_subjids=self._subjids_for_mask(df, outside_window),
+                    affected_tablets=self._tablets_for_mask(df, outside_window),
                 ))
 
         return issues
@@ -995,6 +1150,7 @@ class DataValidator:
                     f"code: {bad_vals}. Expected: {sorted(valid_codes)}."
                 ),
                 affected_subjids=self._subjids_for_mask(df, invalid_code),
+                affected_tablets=self._tablets_for_mask(df, invalid_code),
             ))
 
         if 'subjid' in df.columns:
@@ -1015,6 +1171,7 @@ class DataValidator:
                         f"subjid should only be assigned to consented participants."
                     ),
                     affected_subjids=self._subjids_for_mask(df, bad),
+                    affected_tablets=self._tablets_for_mask(df, bad),
                 ))
 
         return issues
@@ -1045,6 +1202,7 @@ class DataValidator:
                     f"{self.skip_code} (skip)."
                 ),
                 affected_subjids=self._subjids_for_mask(df, invalid_code),
+                affected_tablets=self._tablets_for_mask(df, invalid_code),
             ))
 
         if 'consent' in df.columns:
@@ -1063,6 +1221,7 @@ class DataValidator:
                         f"(null or system-skipped)."
                     ),
                     affected_subjids=self._subjids_for_mask(df, bad),
+                affected_tablets=self._tablets_for_mask(df, bad),
                 ))
 
         return issues
@@ -1081,7 +1240,7 @@ class DataValidator:
         if 'interviewer_id' not in df.columns or 'starttime' not in df.columns:
             return issues
 
-        start = pd.to_datetime(df['starttime'], errors='coerce', format='mixed')
+        start = pd.to_datetime(df['starttime'], errors='coerce', format='%d/%m/%Y %H:%M:%S')
         valid_start = start.notna() & df['interviewer_id'].notna()
 
         work_df = df.loc[valid_start, ['interviewer_id']].copy()
@@ -1091,7 +1250,7 @@ class DataValidator:
         )['interviewer_id'].transform('count')
 
         excessive = pd.Series(False, index=df.index)
-        excessive[valid_start] = daily_counts > 15
+        excessive[valid_start] = daily_counts > 25
         if excessive.any():
             issues.append(dict(
                 check='excessive_daily_interviews',
@@ -1100,9 +1259,10 @@ class DataValidator:
                 record_count=int(excessive.sum()),
                 detail=(
                     f"{excessive.sum()} record(s) belong to an interviewer-day "
-                    f"combination with more than 15 interviews."
+                    f"combination with more than 25 interviews."
                 ),
                 affected_subjids=self._subjids_for_mask(df, excessive),
+                affected_tablets=self._tablets_for_mask(df, excessive),
             ))
 
         unusual_hour = start.notna() & start.dt.hour.between(0, 4)
@@ -1119,6 +1279,7 @@ class DataValidator:
                     f"Examples: {examples}"
                 ),
                 affected_subjids=self._subjids_for_mask(df, unusual_hour),
+                affected_tablets=self._tablets_for_mask(df, unusual_hour),
             ))
 
         return issues
@@ -1155,6 +1316,7 @@ class DataValidator:
                     f"Examples: {examples}"
                 ),
                 affected_subjids=self._subjids_for_mask(df, bad_format[bad_format].index),
+                affected_tablets=self._tablets_for_mask(df, bad_format[bad_format].index),
             ))
 
         expected_prefix = self._COUNTRY_ID_PREFIXES.get(
@@ -1175,6 +1337,7 @@ class DataValidator:
                         f"Examples: {examples}"
                     ),
                     affected_subjids=self._subjids_for_mask(df, wrong_prefix[wrong_prefix].index),
+                affected_tablets=self._tablets_for_mask(df, wrong_prefix[wrong_prefix].index),
                 ))
 
         return issues
@@ -1223,7 +1386,10 @@ class DataValidator:
         if df.empty:
             return issues
 
-        data_cols = [c for c in df.columns if not c.startswith('_')]
+        data_cols = [
+            c for c in df.columns
+            if not c.startswith('_') and c not in self._COMPLETENESS_EXCLUDE
+        ]
         for col in data_cols:
             null_ratio = df[col].isna().mean()
             if null_ratio > 0.5:
