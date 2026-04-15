@@ -123,7 +123,7 @@ def _send(
         csv_buffer = io.StringIO()
         # Sanitise cells to prevent formula injection when opened in Excel/LibreOffice.
         safe_df = attachment_df.copy()
-        for col in safe_df.select_dtypes(include='object').columns:
+        for col in safe_df.select_dtypes(include='str').columns:
             safe_df[col] = safe_df[col].map(
                 lambda v: ("'" + v) if isinstance(v, str) and v and v[0] in ('=', '+', '-', '@', '\t', '\r') else v
             )
