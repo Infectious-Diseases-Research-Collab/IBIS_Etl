@@ -126,8 +126,52 @@ docker compose exec db psql -U ibis_user -d ibis
 | `db` | PostgreSQL connection details (`host`, `port`, `name`, `user`, `password_secret_file`) |
 | `trial` | `dedup_key`, `country_code_map` (country → integer countrycode) |
 | `schedule` | `pipeline_cron` and `store_cron` in standard cron format |
+| `email` | *(optional)* SMTP settings for pipeline notifications — see below |
 
 `password_secret_file` points to the Docker secret mounted at `/run/secrets/db_password` — the password never appears in `config.json` or environment variables.
+
+---
+
+## Email notifications
+
+When an `email` block is present in `config.json`, the pipeline sends two types of emails after every run:
+
+| Recipient list | When sent | Content |
+|----------------|-----------|---------|
+| `pipeline_recipients` | Every run | Stage summary (✓/✗/— per stage with row counts). Subject says **Run complete** or **FAILED**. |
+| `field_recipients` | Only when validation issues exist | Stage summary + validation issue summary grouped by country/site/check, with a full CSV attachment. |
+
+`field_recipients` is a country-keyed dict — each country's team receives only their own issues:
+
+```json
+"email": {
+  "smtp_host": "smtp.gmail.com",
+  "smtp_port": 587,
+  "sender": "ibis-etl@example.com",
+  "smtp_username": "ibis-etl@example.com",
+  "pipeline_recipients": ["pi@example.com"],
+  "field_recipients": {
+    "uganda": ["dm-uganda@example.com", "coordinator@example.com"],
+    "kenya":  ["dm-kenya@example.com"]
+  },
+  "notify_countries": ["uganda", "kenya"],
+  "keyfiles": {
+    "smtp_ini": "secrets/SMTP.ini",
+    "smtp_key": "secrets/SMTP.key"
+  }
+}
+```
+
+`notify_countries` filters the validation report before triggering field emails — useful to suppress noise from countries not yet in active data collection.
+
+SMTP credentials are Fernet-encrypted. Add the credential files to `secrets/`:
+
+| File | Purpose |
+|------|---------|
+| `secrets/SMTP.ini` | Contains `Password=<fernet-encrypted-value>` |
+| `secrets/SMTP.key` | Fernet key for the SMTP password |
+
+The SMTP username is stored in `config.json` as `smtp_username` (not encrypted). For Gmail, use an [App Password](https://support.google.com/accounts/answer/185833) rather than your account password.
 
 ---
 
@@ -142,6 +186,8 @@ All sensitive files live in `secrets/` (gitignored, never committed):
 | `IBIS_ftp.key` | Fernet key for FTP credentials |
 | `Sevenz.ini` | Fernet-encrypted 7zip password |
 | `Sevenz.key` | Fernet key for 7zip password |
+| `SMTP.ini` | Fernet-encrypted SMTP password (optional — only needed if `email` is configured) |
+| `SMTP.key` | Fernet key for SMTP password |
 
 The `db_password.txt` file is mounted as a Docker secret (tmpfs inside the container — never written to disk).
 
@@ -172,8 +218,9 @@ The `db_password.txt` file is mounted as a Docker secret (tmpfs inside the conta
 │   ├── access_reader.py     # mdb-export wrapper, tablet snapshot selection
 │   ├── config.py            # ConfigLoader, path helpers
 │   ├── data_cleaner.py      # Deduplication, country-code filtering
-│   ├── data_validator.py    # 23 data-quality checks
+│   ├── data_validator.py    # 24 data-quality checks
 │   ├── db.py                # SQLAlchemy engine factory, schema init
+│   ├── notifier.py          # Email notifications (pipeline status + field data quality)
 │   ├── sftp_client.py       # Paramiko SFTP wrapper, latest-per-tablet selection
 │   └── utils.py             # Fernet credential decryption
 │
