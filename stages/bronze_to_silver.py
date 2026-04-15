@@ -67,7 +67,7 @@ class BronzeToSilver(BaseStage):
                 errors.append(msg)
 
         if not all_cleaned:
-            return StageResult(success=len(errors) == 0, rows_written=0, errors=errors)
+            return StageResult(success=False, rows_written=0, errors=errors)
 
         silver_df = pd.concat(all_cleaned, ignore_index=True)
 

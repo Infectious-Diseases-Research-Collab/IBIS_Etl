@@ -41,22 +41,37 @@ class StoreIbis(BaseStage):
                         f"SELECT *, CURRENT_DATE::text AS snapshot_date "
                         f"FROM ibis.{table} WHERE FALSE"
                     ))
-                    # Idempotency guard: skip if this table already has a snapshot for
-                    # today. Prevents duplicate rows when the full pipeline (-a) and the
-                    # dedicated store_cron both run on the same day.
-                    already = conn.execute(
+                    # Idempotency guard: check whether today's snapshot is already
+                    # complete by comparing row counts. If a previous run inserted
+                    # partial rows (e.g. mid-INSERT failure), delete and retry.
+                    snapshot_count = conn.execute(
                         text(
-                            f"SELECT 1 FROM store_ibis.{table} "
-                            f"WHERE snapshot_date = :d LIMIT 1"
+                            f"SELECT COUNT(*) FROM store_ibis.{table} "
+                            f"WHERE snapshot_date = :d"
                         ),
                         {'d': snapshot_date},
-                    ).fetchone()
-                    if already:
+                    ).scalar()
+                    source_count = conn.execute(
+                        text(f"SELECT COUNT(*) FROM ibis.{table}")
+                    ).scalar()
+
+                    if snapshot_count == source_count and snapshot_count > 0:
                         logger.info(
                             f"  Skipping store_ibis.{table} — already snapshotted today "
-                            f"({snapshot_date})."
+                            f"({snapshot_date}, {snapshot_count} rows)."
                         )
                         continue
+
+                    if snapshot_count > 0:
+                        # Partial snapshot from a previous failed run — clean it up first
+                        logger.warning(
+                            f"  Removing incomplete snapshot for store_ibis.{table} "
+                            f"({snapshot_count}/{source_count} rows) — will retry."
+                        )
+                        conn.execute(text(
+                            f"DELETE FROM store_ibis.{table} WHERE snapshot_date = :d"
+                        ), {'d': snapshot_date})
+
                     # Append current production rows with today's snapshot date
                     conn.execute(text(
                         f"INSERT INTO store_ibis.{table} "

@@ -44,6 +44,7 @@ services:
       - ./Downloads:/app/Downloads
       - ./Extracted:/app/Extracted
     command: ["cron", "-f"]
+    restart: unless-stopped
 
 secrets:
   db_password:

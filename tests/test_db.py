@@ -18,12 +18,13 @@ def test_init_schemas_creates_all_schemas():
 def test_schemas_list_contains_all_layers():
     assert set(SCHEMAS) == {'bronze_ibis', 'silver_ibis', 'gold_ibis', 'ibis', 'store_ibis'}
 
-def test_create_db_engine_uses_env_password(monkeypatch):
-    monkeypatch.setenv('TEST_PW', 'secret')
+def test_create_db_engine_reads_secret_file(tmp_path):
+    secret_file = tmp_path / 'db_password'
+    secret_file.write_text('secret')
     config = MagicMock()
     config.get.return_value = {
         'host': 'localhost', 'port': 5432, 'name': 'ibis',
-        'user': 'ibis_user', 'password_env': 'TEST_PW'
+        'user': 'ibis_user', 'password_secret_file': str(secret_file)
     }
     with patch('modules.db.create_engine') as mock_create:
         create_db_engine(config)
