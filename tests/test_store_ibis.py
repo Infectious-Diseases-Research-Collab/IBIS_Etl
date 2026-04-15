@@ -5,28 +5,31 @@ from datetime import date
 from stages.store_ibis import StoreIbis
 
 
-def test_store_ibis_appends_snapshot_with_date():
+def _make_engine(execute_side_effect):
     engine = MagicMock()
     mock_conn = MagicMock()
     engine.begin.return_value.__enter__ = MagicMock(return_value=mock_conn)
     engine.begin.return_value.__exit__ = MagicMock(return_value=False)
+    mock_conn.execute.side_effect = execute_side_effect
+    return engine, mock_conn
 
+
+def test_store_ibis_appends_snapshot_with_date():
     def execute_side_effect(stmt, *args, **kwargs):
         sql = str(stmt)
         result = MagicMock()
         if 'information_schema.tables' in sql:
             result.fetchall.return_value = [('d_participant',), ('d_enrollment',)]
-        elif 'snapshot_date' in sql and 'LIMIT 1' in sql:
-            result.fetchone.return_value = None  # not yet snapshotted today
+        elif 'COUNT(*)' in sql and 'snapshot_date' in sql:
+            result.scalar.return_value = 0   # no existing snapshot rows
+        elif 'COUNT(*)' in sql:
+            result.scalar.return_value = 100  # source row count
         else:
             result.fetchall.return_value = []
-            result.fetchone.return_value = None
         return result
 
-    mock_conn.execute.side_effect = execute_side_effect
-
-    config = MagicMock()
-    stage = StoreIbis(config=config, engine=engine)
+    engine, mock_conn = _make_engine(execute_side_effect)
+    stage = StoreIbis(config=MagicMock(), engine=engine)
 
     with patch('stages.store_ibis.date') as mock_date:
         mock_date.today.return_value = date(2026, 4, 13)
@@ -42,30 +45,20 @@ def test_store_ibis_appends_snapshot_with_date():
 
 
 def test_store_ibis_skips_already_snapshotted_today():
-    """If a table already has a snapshot for today, that table is not inserted again."""
-    engine = MagicMock()
-    mock_conn = MagicMock()
-    engine.begin.return_value.__enter__ = MagicMock(return_value=mock_conn)
-    engine.begin.return_value.__exit__ = MagicMock(return_value=False)
-
-    # One table in ibis schema
+    """Table with matching row count is skipped — no INSERT."""
     def execute_side_effect(stmt, *args, **kwargs):
         sql = str(stmt)
         result = MagicMock()
-        if 'information_schema.tables' in sql and 'ibis' in sql and 'store_ibis' not in sql:
+        if 'information_schema.tables' in sql:
             result.fetchall.return_value = [('d_participant',)]
-        elif 'snapshot_date' in sql and 'LIMIT 1' in sql:
-            # Simulate: already snapshotted today
-            result.fetchone.return_value = (1,)
+        elif 'COUNT(*)' in sql:
+            result.scalar.return_value = 50  # same for both snapshot and source counts
         else:
             result.fetchall.return_value = []
-            result.fetchone.return_value = None
         return result
 
-    mock_conn.execute.side_effect = execute_side_effect
-
-    config = MagicMock()
-    stage = StoreIbis(config=config, engine=engine)
+    engine, mock_conn = _make_engine(execute_side_effect)
+    stage = StoreIbis(config=MagicMock(), engine=engine)
 
     with patch('stages.store_ibis.date') as mock_date:
         mock_date.today.return_value = date(2026, 4, 13)
@@ -73,5 +66,34 @@ def test_store_ibis_skips_already_snapshotted_today():
 
     assert result.success
     executed_sql = [str(c.args[0]) for c in mock_conn.execute.call_args_list]
-    # INSERT should NOT have been called since today is already snapshotted
     assert not any('INSERT INTO store_ibis.d_participant' in s for s in executed_sql)
+
+
+def test_store_ibis_retries_partial_snapshot():
+    """Partial snapshot (rows exist but count < source) is deleted and reinserted."""
+    call_count = {'n': 0}
+
+    def execute_side_effect(stmt, *args, **kwargs):
+        sql = str(stmt)
+        result = MagicMock()
+        if 'information_schema.tables' in sql:
+            result.fetchall.return_value = [('d_participant',)]
+        elif 'COUNT(*)' in sql and 'snapshot_date' in sql:
+            result.scalar.return_value = 10   # partial — fewer than source
+        elif 'COUNT(*)' in sql:
+            result.scalar.return_value = 100  # source count
+        else:
+            result.fetchall.return_value = []
+        return result
+
+    engine, mock_conn = _make_engine(execute_side_effect)
+    stage = StoreIbis(config=MagicMock(), engine=engine)
+
+    with patch('stages.store_ibis.date') as mock_date:
+        mock_date.today.return_value = date(2026, 4, 13)
+        result = stage.run()
+
+    assert result.success
+    executed_sql = [str(c.args[0]) for c in mock_conn.execute.call_args_list]
+    assert any('DELETE FROM store_ibis.d_participant' in s for s in executed_sql)
+    assert any('INSERT INTO store_ibis.d_participant' in s for s in executed_sql)

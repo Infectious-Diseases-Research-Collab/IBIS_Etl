@@ -28,11 +28,28 @@ class PromoteIbis(BaseStage):
             logger.info(f"Promoting {len(tables)} table(s) from gold_ibis → ibis.")
 
             for table in tables:
+                new_table = f'_new_{table}'
+                old_table = f'_old_{table}'
                 try:
-                    conn.execute(text(f'DROP TABLE IF EXISTS ibis.{table}'))
-                    conn.execute(
-                        text(f'CREATE TABLE ibis.{table} AS SELECT * FROM gold_ibis.{table}')
-                    )
+                    # Step 1: build the new table under a temp name in ibis schema
+                    conn.execute(text(f'DROP TABLE IF EXISTS ibis.{new_table}'))
+                    conn.execute(text(
+                        f'CREATE TABLE ibis.{new_table} AS '
+                        f'SELECT * FROM gold_ibis.{table}'
+                    ))
+
+                    # Step 2: atomic rename swap — old live table → _old, new → live
+                    conn.execute(text(
+                        f'ALTER TABLE IF EXISTS ibis.{table} '
+                        f'RENAME TO {old_table}'
+                    ))
+                    conn.execute(text(
+                        f'ALTER TABLE ibis.{new_table} RENAME TO {table}'
+                    ))
+
+                    # Step 3: drop the old table now that the new one is live
+                    conn.execute(text(f'DROP TABLE IF EXISTS ibis.{old_table}'))
+
                     logger.info(f"  Promoted: gold_ibis.{table} → ibis.{table}")
                 except Exception as exc:
                     msg = f"Failed to promote '{table}': {exc}"

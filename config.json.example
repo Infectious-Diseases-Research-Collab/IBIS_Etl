@@ -16,10 +16,10 @@
     "username_ibis": "ftp_username"
   },
   "keyfiles": {
-    "ftp_cred_filename_IBIS": "keyFiles/IBIS_ftp.ini",
-    "ftp_key_file_IBIS": "keyFiles/IBIS_ftp.key",
-    "sevenz_cred_filename": "keyFiles/Sevenz.ini",
-    "sevenz_key_file": "keyFiles/Sevenz.key"
+    "ftp_cred_filename_IBIS": "secrets/IBIS_ftp.ini",
+    "ftp_key_file_IBIS": "secrets/IBIS_ftp.key",
+    "sevenz_cred_filename": "secrets/Sevenz.ini",
+    "sevenz_key_file": "secrets/Sevenz.key"
   },
   "access_table_name": "baseline",
   "excluded_tablets": [],
@@ -28,7 +28,7 @@
     "port": 5432,
     "name": "ibis",
     "user": "ibis_user",
-    "password_env": "IBIS_DB_PASSWORD"
+    "password_secret_file": "/run/secrets/db_password"
   },
   "trial": {
     "name": "ibis",
@@ -47,7 +47,13 @@
     "smtp_host": "smtp.example.com",
     "smtp_port": 587,
     "sender": "ibis-etl@example.com",
-    "recipients": ["datamanager@example.com", "pi@example.com"],
+    "smtp_username": "ibis-etl@example.com",
+    "pipeline_recipients": ["pi@example.com"],
+    "field_recipients": {
+      "country1": ["dm-country1@example.com"],
+      "country2": ["dm-country2@example.com"]
+    },
+    "notify_countries": ["country1", "country2"],
     "keyfiles": {
       "smtp_ini": "secrets/SMTP.ini",
       "smtp_key": "secrets/SMTP.key"
