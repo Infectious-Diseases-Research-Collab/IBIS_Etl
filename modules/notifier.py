@@ -4,6 +4,7 @@ import html as _html
 import io
 import logging
 import smtplib
+import ssl
 from datetime import date
 from email import encoders
 from email.mime.base import MIMEBase
@@ -35,7 +36,7 @@ def _load_smtp_password(ini_path: str, key_path: str) -> str:
             cfg[k.strip()] = v.strip()
 
     if 'Password' not in cfg:
-        raise KeyError(f"'Password' key not found in credential file: {ini_path}")
+        raise KeyError("'Password' key not found in SMTP credential file.")
 
     return cipher.decrypt(cfg['Password'].encode()).decode()
 
@@ -120,7 +121,13 @@ def _send(
 
     if attachment_df is not None:
         csv_buffer = io.StringIO()
-        attachment_df.to_csv(csv_buffer, index=False)
+        # Sanitise cells to prevent formula injection when opened in Excel/LibreOffice.
+        safe_df = attachment_df.copy()
+        for col in safe_df.select_dtypes(include='object').columns:
+            safe_df[col] = safe_df[col].map(
+                lambda v: ("'" + v) if isinstance(v, str) and v and v[0] in ('=', '+', '-', '@', '\t', '\r') else v
+            )
+        safe_df.to_csv(csv_buffer, index=False)
         part = MIMEBase('application', 'octet-stream')
         part.set_payload(csv_buffer.getvalue().encode('utf-8'))
         encoders.encode_base64(part)
@@ -129,7 +136,7 @@ def _send(
         msg.attach(part)
 
     with smtplib.SMTP(email_cfg['smtp_host'], email_cfg['smtp_port']) as smtp:
-        smtp.starttls()
+        smtp.starttls(context=ssl.create_default_context())
         smtp.login(username, password)
         smtp.sendmail(email_cfg['sender'], recipients, msg.as_string())
 
