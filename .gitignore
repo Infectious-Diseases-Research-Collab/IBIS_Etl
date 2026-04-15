@@ -32,4 +32,4 @@ Output/
 
 # pytest
 .pytest_cache/
-docs/.
+docs/
