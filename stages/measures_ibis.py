@@ -14,9 +14,24 @@ logger = logging.getLogger(__name__)
 
 SQL_MEASURES_DIR = os.path.join(os.path.dirname(__file__), '..', 'sql', 'measures')
 
+# Country name → (facility column, code→name map)
+_FACILITY_CONFIG: dict[str, tuple[str, dict]] = {
+    'kenya':  ('health_facility_ke', DataValidator._FACILITY_CODES_KE),
+    'uganda': ('health_facility_ug', DataValidator._FACILITY_CODES_UG),
+}
+
 
 def _load_sql_files(directory: str) -> list[Path]:
     return sorted(Path(directory).glob('*.sql'))
+
+
+def _facility_name(code, code_map: dict) -> str:
+    """Return a decoded facility label, e.g. '11 (Bushenyi HCIV)'."""
+    try:
+        icode = int(float(str(code)))
+    except (ValueError, TypeError):
+        return str(code)
+    return f"{icode} ({code_map.get(icode, 'Unknown')})"
 
 
 class MeasuresIbis(BaseStage):
@@ -36,27 +51,52 @@ class MeasuresIbis(BaseStage):
         errors: list[str] = []
         all_reports: list[pd.DataFrame] = []
 
-        for country, group in silver_df.groupby('country'):
-            try:
-                country_code = country_code_map.get(str(country))
-                if country_code is None:
-                    logger.warning(
-                        f"[{country}] No country_code in config — countrycode mismatch check skipped."
-                    )
-                validator = DataValidator()
-                report = validator.validate(
-                    group.copy(),
-                    country_code=country_code,
-                    country_name=str(country),
+        for country, country_group in silver_df.groupby('country'):
+            country_str = str(country)
+            country_code = country_code_map.get(country_str)
+            if country_code is None:
+                logger.warning(
+                    f"[{country_str}] No country_code in config — "
+                    f"countrycode mismatch check skipped."
                 )
-                all_reports.append(report)
-            except Exception as exc:
-                msg = f"[{country}] Validation failed: {exc}"
-                logger.error(msg)
-                errors.append(msg)
+
+            fac_field, fac_codes = _FACILITY_CONFIG.get(country_str, (None, {}))
+
+            # Build (site_name, sub-group) pairs — one per health facility
+            if fac_field and fac_field in country_group.columns:
+                fac_col = pd.to_numeric(country_group[fac_field], errors='coerce')
+                tmp = country_group.copy()
+                tmp['_fac'] = fac_col
+
+                site_groups: list[tuple[str, pd.DataFrame]] = []
+                for fac_code, fac_group in tmp.groupby('_fac', dropna=False):
+                    if pd.isna(fac_code):
+                        site = '(Unknown facility)'
+                    else:
+                        site = _facility_name(fac_code, fac_codes)
+                    site_groups.append((site, fac_group.drop(columns=['_fac'])))
+            else:
+                # No facility breakdown available — validate whole country as one group
+                site_groups = [('', country_group)]
+
+            for site, group in site_groups:
+                label = f"{country_str}/{site}" if site else country_str
+                try:
+                    validator = DataValidator()
+                    report = validator.validate(
+                        group.copy(),
+                        country_code=country_code,
+                        country_name=country_str,
+                        site_name=site,
+                    )
+                    all_reports.append(report)
+                except Exception as exc:
+                    msg = f"[{label}] Validation failed: {exc}"
+                    logger.error(msg)
+                    errors.append(msg)
 
         if not all_reports:
-            logger.warning("All country validations failed — skipping report write.")
+            logger.warning("All validations failed — skipping report write.")
             return StageResult(success=False, rows_written=0, errors=errors)
 
         full_report = pd.concat(all_reports, ignore_index=True)
@@ -85,9 +125,6 @@ class MeasuresIbis(BaseStage):
                     msg = f"SQL error in '{sql_path.name}': {exc}"
                     logger.error(msg)
                     errors.append(msg)
-                    # Re-raise to roll back the SQL transaction. Note: ds_validation_report
-                    # was already written above and will not be rolled back. A re-run
-                    # will overwrite it (if_exists='replace'), so this is recoverable.
                     raise
 
         return StageResult(success=len(errors) == 0, rows_written=len(full_report), errors=errors)
