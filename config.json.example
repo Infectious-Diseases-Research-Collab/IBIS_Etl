@@ -42,5 +42,15 @@
   "schedule": {
     "pipeline_cron": "0 2 * * *",
     "store_cron": "0 3 * * 0"
+  },
+  "email": {
+    "smtp_host": "smtp.example.com",
+    "smtp_port": 587,
+    "sender": "ibis-etl@example.com",
+    "recipients": ["datamanager@example.com", "pi@example.com"],
+    "keyfiles": {
+      "smtp_ini": "secrets/SMTP.ini",
+      "smtp_key": "secrets/SMTP.key"
+    }
   }
 }
