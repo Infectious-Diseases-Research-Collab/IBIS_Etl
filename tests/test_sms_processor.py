@@ -135,6 +135,19 @@ def test_load_blasta_creds_missing_username_raises(tmp_path):
         _load_blasta_creds(str(ini), str(key_file))
 
 
+def test_load_blasta_creds_missing_password_raises(tmp_path):
+    from modules.sms_processor import _load_blasta_creds
+
+    key = Fernet.generate_key()
+    ini = tmp_path / 'BLASTA.ini'
+    ini.write_text("Username=myuser\n")  # no Password
+    key_file = tmp_path / 'BLASTA.key'
+    key_file.write_text(key.decode())
+
+    with pytest.raises(KeyError, match='Password'):
+        _load_blasta_creds(str(ini), str(key_file))
+
+
 # ---------------------------------------------------------------------------
 # _substitute_placeholder
 # ---------------------------------------------------------------------------
@@ -163,7 +176,7 @@ def test_substitute_placeholder_invalid_date_unchanged(caplog):
     with caplog.at_level(logging.WARNING):
         result = _substitute_placeholder('Appt: [date]', 'not-a-date')
     assert result == 'Appt: [date]'
-    assert 'Invalid' in caplog.text
+    assert 'Invalid appointment date' in caplog.text
 
 
 # ---------------------------------------------------------------------------
@@ -179,8 +192,6 @@ def test_blasta_client_sends_successfully():
             MagicMock(status_code=200, json=lambda: {'access_token': 'tok123'}),
             MagicMock(status_code=200, json=lambda: {'msg_id': 'M001', 'status_code': '201'}),
         ]
-        mock_post.return_value.raise_for_status = MagicMock()
-
         client = BlastaClient('user', 'pass', max_retries=3)
         result = client.send('0700000001', 'Hello')
 

@@ -22,15 +22,15 @@ BLASTA_BASE_URL = "https://sms.dmarkmobile.com/v3/api"
 
 def _load_blasta_creds(ini_path: str, key_path: str) -> tuple[str, str]:
     """Load and decrypt BLASTA username and password from secrets files."""
-    with open(key_path) as f:
+    with open(key_path, encoding='utf-8') as f:
         key = f.read().strip().encode()
     cipher = Fernet(key)
 
     cfg: dict[str, str] = {}
-    with open(ini_path) as f:
+    with open(ini_path, encoding='utf-8') as f:
         for line in f:
             line = line.strip()
-            if not line or line.startswith('#') or '=' not in line:
+            if not line or line.startswith('#') or line.startswith('[') or '=' not in line:
                 continue
             k, _, v = line.partition('=')
             cfg[k.strip()] = v.strip()
@@ -51,7 +51,7 @@ def _load_blasta_creds(ini_path: str, key_path: str) -> tuple[str, str]:
 
 def _substitute_placeholder(message: str, appointment_date) -> str:
     """Replace [...] in message with formatted appointment_date (DD/MM/YYYY)."""
-    if not appointment_date:
+    if appointment_date is None:
         return message
     try:
         if isinstance(appointment_date, str):
