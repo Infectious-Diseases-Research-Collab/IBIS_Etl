@@ -318,3 +318,50 @@ def test_send_due_messages_missing_template_skips():
 
     assert result.skipped == 1
     assert result.sent == 0
+
+
+# ---------------------------------------------------------------------------
+# SendSms stage
+# ---------------------------------------------------------------------------
+
+def test_send_sms_stage_returns_success_result():
+    from stages.send_sms import SendSms
+    from modules.sms_processor import SendResult
+
+    engine, _ = make_engine_mock()
+    config = make_config()
+
+    stage = SendSms(config=config, engine=engine)
+
+    with patch('stages.send_sms.SmsProcessor') as MockProcessor:
+        MockProcessor.return_value.run.return_value = SendResult(sent=5, failed=0, skipped=1)
+        result = stage.run()
+
+    assert result.success is True
+    assert result.rows_written == 5
+    assert result.errors == []
+    assert result.metadata['sent'] == 5
+    assert result.metadata['skipped'] == 1
+
+
+def test_send_sms_stage_returns_failure_on_failed_sends():
+    from stages.send_sms import SendSms
+    from modules.sms_processor import SendResult
+
+    engine, _ = make_engine_mock()
+    stage = SendSms(config=make_config(), engine=engine)
+
+    with patch('stages.send_sms.SmsProcessor') as MockProcessor:
+        MockProcessor.return_value.run.return_value = SendResult(
+            sent=3, failed=2, skipped=0,
+            failures=[
+                {'subjid': 'X1', 'mobile_number': '07001', 'week': 8, 'error': 'timeout'},
+                {'subjid': 'X2', 'mobile_number': '07002', 'week': 11, 'error': 'bad number'},
+            ],
+        )
+        result = stage.run()
+
+    assert result.success is False
+    assert result.rows_written == 3
+    assert len(result.errors) == 2
+    assert 'subjid=X1' in result.errors[0]
