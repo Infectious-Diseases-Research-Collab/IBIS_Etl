@@ -190,6 +190,9 @@ def send_pipeline_report(
             pipeline_subject = f'IBIS Pipeline \u2014 Run complete ({today})'
 
         pipeline_plain = stage_section
+        sms_summary = _build_sms_summary(results)
+        if sms_summary:
+            pipeline_plain = f"{pipeline_plain}\n\n{sms_summary}"
         pipeline_html = f'<pre style="font-family:monospace;font-size:13px">{_html.escape(pipeline_plain)}</pre>'
         try:
             _send(email_cfg, pipeline_recipients, pipeline_subject, pipeline_plain, pipeline_html)
@@ -215,3 +218,91 @@ def send_pipeline_report(
                 logger.info(f'Field quality report ({country}) sent to {recipients}.')
             except Exception as exc:
                 logger.error(f'Notifier failed (field recipients {country}) \u2014 email not sent: {exc}')
+
+
+def _build_sms_summary(results: dict[str, 'StageResult']) -> str | None:
+    """Build SMS summary section for the pipeline email. Returns None if send_sms didn't run."""
+    sms_result = results.get('send_sms')
+    if sms_result is None:
+        return None
+    meta = getattr(sms_result, 'metadata', {})
+    if not meta:
+        return None
+
+    sent     = meta.get('sent', 0)
+    failed   = meta.get('failed', 0)
+    skipped  = meta.get('skipped', 0)
+    failures = meta.get('failures', [])
+
+    sep   = '─' * 47
+    lines = ['SMS Summary', sep]
+    lines.append(f'  Sent:     {sent}')
+    lines.append(f'  Failed:   {failed}')
+    lines.append(f'  Skipped:  {skipped}')
+
+    if failures:
+        lines.append('')
+        lines.append('  Failed messages:')
+        for f in failures:
+            lines.append(
+                f"    subjid={f['subjid']}  mobile={f['mobile_number']}"
+                f"  week={f['week']}  error: {f['error']}"
+            )
+    lines.append(sep)
+    return '\n'.join(lines)
+
+
+def _build_weekly_sms_report(rows: list[dict], week_ending: str) -> str:
+    """Build plain-text weekly SMS report table."""
+    sep   = '─' * 65
+    lines = [f'IBIS SMS Weekly Report — week ending {week_ending}', sep]
+    lines.append(f'{"Health Facility":<32} {"Wk":>3} {"Sent":>6} {"Failed":>7} {"Opt-out":>8}')
+    lines.append(sep)
+
+    total_sent = total_failed = total_opted = 0
+    for row in rows:
+        facility = (row['health_facility_ug'] or 'Unknown')[:31]
+        lines.append(
+            f'{facility:<32} {row["week"]:>3} {row["sent"]:>6}'
+            f' {row["failed"]:>7} {row["opted_out"]:>8}'
+        )
+        total_sent   += row['sent']
+        total_failed += row['failed']
+        total_opted  += row['opted_out']
+
+    lines.append(sep)
+    lines.append(f'{"Total":<36} {total_sent:>6} {total_failed:>7} {total_opted:>8}')
+    lines.append(sep)
+    return '\n'.join(lines)
+
+
+def send_sms_weekly_report(engine, config) -> None:
+    """Send weekly SMS activity report to Uganda field recipients."""
+    email_cfg = config.get('email')
+    if not email_cfg:
+        return
+
+    field_recipients_cfg = email_cfg.get('field_recipients', {})
+    # Accept both 'uganda' and 'Uganda' as keys
+    uganda_recipients = next(
+        (v for k, v in field_recipients_cfg.items() if k.lower() == 'uganda'),
+        [],
+    )
+    if not uganda_recipients:
+        logger.warning("No Uganda field recipients configured — weekly SMS report not sent.")
+        return
+
+    from modules.sms_processor import SmsProcessor
+    processor = SmsProcessor(config=config, engine=engine)
+    rows = processor.get_weekly_report_data()
+
+    today = date.today().strftime('%d %b %Y')
+    subject = f'IBIS SMS Weekly Report \u2014 week ending {today}'
+    plain   = _build_weekly_sms_report(rows, today)
+    html    = f'<pre style="font-family:monospace;font-size:13px">{_html.escape(plain)}</pre>'
+
+    try:
+        _send(email_cfg, uganda_recipients, subject, plain, html)
+        logger.info('Weekly SMS report sent to %s.', uganda_recipients)
+    except Exception as exc:
+        logger.error('Weekly SMS report email failed: %s', exc)

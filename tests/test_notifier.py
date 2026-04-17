@@ -233,3 +233,67 @@ def test_send_pipeline_report_does_not_raise_on_smtp_error(tmp_path):
                 results=results, stages=['mdb_to_bronze'],
                 engine=MagicMock(), config=config,
             )
+
+
+# ---------------------------------------------------------------------------
+# _build_sms_summary
+# ---------------------------------------------------------------------------
+
+def test_build_sms_summary_shows_sent_failed_skipped():
+    from modules.notifier import _build_sms_summary
+    from stages.base import StageResult
+
+    results = {
+        'send_sms': StageResult(
+            success=True,
+            rows_written=10,
+            metadata={
+                'sent': 10,
+                'failed': 2,
+                'skipped': 1,
+                'failures': [
+                    {'subjid': 'IBIS001', 'mobile_number': '0700001', 'week': 8, 'error': 'timeout'},
+                ],
+            },
+        )
+    }
+    summary = _build_sms_summary(results)
+
+    assert 'Sent:' in summary
+    assert '10' in summary
+    assert 'Failed:' in summary
+    assert '2' in summary
+    assert 'IBIS001' in summary
+    assert 'timeout' in summary
+
+
+def test_build_sms_summary_returns_none_when_stage_absent():
+    from modules.notifier import _build_sms_summary
+    assert _build_sms_summary({}) is None
+
+
+def test_build_sms_summary_returns_none_when_no_metadata():
+    from modules.notifier import _build_sms_summary
+    from stages.base import StageResult
+    results = {'send_sms': StageResult(success=True)}
+    assert _build_sms_summary(results) is None
+
+
+# ---------------------------------------------------------------------------
+# _build_weekly_sms_report
+# ---------------------------------------------------------------------------
+
+def test_build_weekly_sms_report_includes_facility_and_totals():
+    from modules.notifier import _build_weekly_sms_report
+
+    rows = [
+        {'health_facility_ug': 'Kampala HC', 'week': 8,  'sent': 5, 'failed': 1, 'opted_out': 0},
+        {'health_facility_ug': 'Kampala HC', 'week': 11, 'sent': 3, 'failed': 0, 'opted_out': 0},
+        {'health_facility_ug': 'Wakiso HC',  'week': 8,  'sent': 4, 'failed': 0, 'opted_out': 1},
+    ]
+    report = _build_weekly_sms_report(rows, '17 Apr 2026')
+
+    assert 'Kampala HC' in report
+    assert 'Wakiso HC' in report
+    assert 'Total' in report
+    assert '17 Apr 2026' in report
