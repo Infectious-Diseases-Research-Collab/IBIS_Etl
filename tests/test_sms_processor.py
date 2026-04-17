@@ -96,3 +96,71 @@ def test_load_templates_skips_blank_arms(tmp_path):
 
     templates = load_templates_from_excel(str(tmp_path))
     assert len(templates) == 2
+
+
+# ---------------------------------------------------------------------------
+# _load_blasta_creds
+# ---------------------------------------------------------------------------
+
+def test_load_blasta_creds_roundtrip(tmp_path):
+    from modules.sms_processor import _load_blasta_creds
+
+    key = Fernet.generate_key()
+    cipher = Fernet(key)
+    encrypted = cipher.encrypt(b'hunter2').decode()
+
+    ini = tmp_path / 'BLASTA.ini'
+    ini.write_text(f"Username=myuser\nPassword={encrypted}\n")
+    key_file = tmp_path / 'BLASTA.key'
+    key_file.write_text(key.decode())
+
+    username, password = _load_blasta_creds(str(ini), str(key_file))
+    assert username == 'myuser'
+    assert password == 'hunter2'
+
+
+def test_load_blasta_creds_missing_username_raises(tmp_path):
+    from modules.sms_processor import _load_blasta_creds
+
+    key = Fernet.generate_key()
+    cipher = Fernet(key)
+    encrypted = cipher.encrypt(b'pw').decode()
+
+    ini = tmp_path / 'BLASTA.ini'
+    ini.write_text(f"Password={encrypted}\n")  # no Username
+    key_file = tmp_path / 'BLASTA.key'
+    key_file.write_text(key.decode())
+
+    with pytest.raises(KeyError, match='Username'):
+        _load_blasta_creds(str(ini), str(key_file))
+
+
+# ---------------------------------------------------------------------------
+# _substitute_placeholder
+# ---------------------------------------------------------------------------
+
+def test_substitute_placeholder_replaces_bracket_text():
+    from modules.sms_processor import _substitute_placeholder
+    result = _substitute_placeholder('Your appt is [insert date]', '25/12/2025')
+    assert result == 'Your appt is 25/12/2025'
+
+
+def test_substitute_placeholder_no_bracket_unchanged():
+    from modules.sms_processor import _substitute_placeholder
+    msg = 'No placeholders here'
+    assert _substitute_placeholder(msg, '25/12/2025') == msg
+
+
+def test_substitute_placeholder_none_date_unchanged():
+    from modules.sms_processor import _substitute_placeholder
+    msg = 'Your appt is [insert date]'
+    assert _substitute_placeholder(msg, None) == msg
+
+
+def test_substitute_placeholder_invalid_date_unchanged(caplog):
+    from modules.sms_processor import _substitute_placeholder
+    import logging
+    with caplog.at_level(logging.WARNING):
+        result = _substitute_placeholder('Appt: [date]', 'not-a-date')
+    assert result == 'Appt: [date]'
+    assert 'Invalid' in caplog.text
