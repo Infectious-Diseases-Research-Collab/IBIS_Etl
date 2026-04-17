@@ -20,3 +20,11 @@ def test_base_stage_run_raises():
 def test_base_stage_has_required_attributes():
     assert hasattr(BaseStage, 'name')
     assert hasattr(BaseStage, 'dependencies')
+
+def test_stage_result_metadata_defaults_empty():
+    result = StageResult(success=True)
+    assert result.metadata == {}
+
+def test_stage_result_metadata_accepts_dict():
+    result = StageResult(success=True, metadata={'sent': 5, 'failed': 1})
+    assert result.metadata['sent'] == 5

@@ -8,7 +8,7 @@ from sqlalchemy.engine import Engine, URL
 
 logger = logging.getLogger(__name__)
 
-SCHEMAS = ['bronze_ibis', 'silver_ibis', 'gold_ibis', 'ibis', 'store_ibis']
+SCHEMAS = ['bronze_ibis', 'silver_ibis', 'gold_ibis', 'ibis', 'store_ibis', 'sms']
 
 
 def create_db_engine(config) -> Engine:
