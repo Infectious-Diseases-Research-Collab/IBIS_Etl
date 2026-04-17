@@ -164,3 +164,67 @@ def test_substitute_placeholder_invalid_date_unchanged(caplog):
         result = _substitute_placeholder('Appt: [date]', 'not-a-date')
     assert result == 'Appt: [date]'
     assert 'Invalid' in caplog.text
+
+
+# ---------------------------------------------------------------------------
+# BlastaClient
+# ---------------------------------------------------------------------------
+
+def test_blasta_client_sends_successfully():
+    from modules.sms_processor import BlastaClient
+
+    with patch('modules.sms_processor.requests.post') as mock_post:
+        # First call: get_token; second call: send_sms
+        mock_post.side_effect = [
+            MagicMock(status_code=200, json=lambda: {'access_token': 'tok123'}),
+            MagicMock(status_code=200, json=lambda: {'msg_id': 'M001', 'status_code': '201'}),
+        ]
+        mock_post.return_value.raise_for_status = MagicMock()
+
+        client = BlastaClient('user', 'pass', max_retries=3)
+        result = client.send('0700000001', 'Hello')
+
+    assert result['msg_id'] == 'M001'
+    assert mock_post.call_count == 2
+
+
+def test_blasta_client_refreshes_token_on_401():
+    from modules.sms_processor import BlastaClient
+
+    token_resp = MagicMock(status_code=200, json=lambda: {'access_token': 'newtok'})
+    token_resp.raise_for_status = MagicMock()
+    fail_401 = MagicMock(status_code=401, json=lambda: {})
+    fail_401.raise_for_status = MagicMock()
+    success_resp = MagicMock(status_code=200, json=lambda: {'msg_id': 'M002'})
+    success_resp.raise_for_status = MagicMock()
+
+    with patch('modules.sms_processor.requests.post') as mock_post:
+        # get_token → 401 send → get_token refresh → success send
+        mock_post.side_effect = [token_resp, fail_401, token_resp, success_resp]
+
+        client = BlastaClient('user', 'pass', max_retries=3)
+        result = client.send('0700000001', 'Hello')
+
+    assert result['msg_id'] == 'M002'
+
+
+def test_blasta_client_raises_after_max_retries():
+    from modules.sms_processor import BlastaClient
+
+    import requests as req_lib
+
+    token_resp = MagicMock(status_code=200, json=lambda: {'access_token': 'tok'})
+    token_resp.raise_for_status = MagicMock()
+
+    with patch('modules.sms_processor.requests.post') as mock_post:
+        with patch('modules.sms_processor.time.sleep'):
+            mock_post.side_effect = [
+                token_resp,
+                req_lib.RequestException('timeout'),
+                req_lib.RequestException('timeout'),
+                req_lib.RequestException('timeout'),
+            ]
+
+            client = BlastaClient('user', 'pass', max_retries=3)
+            with pytest.raises(req_lib.RequestException):
+                client.send('0700000001', 'Hello')
