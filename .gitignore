@@ -27,6 +27,9 @@ Output/
 # Logs
 *.log
 
+# Git worktrees
+.worktrees/
+
 # macOS
 .DS_Store
 
