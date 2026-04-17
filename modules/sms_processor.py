@@ -237,7 +237,7 @@ class SmsProcessor:
                 SELECT q.id, q.subjid, q.mobile_number, q.arm_text, q.language,
                        q.week, q.appointment_date
                 FROM sms.queue q
-                WHERE q.scheduled_date <= CURRENT_DATE
+                WHERE q.scheduled_date = CURRENT_DATE
                   AND q.status = 'pending'
                   AND q.opted_out = FALSE
                   AND NOT EXISTS (
