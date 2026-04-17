@@ -228,3 +228,93 @@ def test_blasta_client_raises_after_max_retries():
             client = BlastaClient('user', 'pass', max_retries=3)
             with pytest.raises(req_lib.RequestException):
                 client.send('0700000001', 'Hello')
+
+
+# ---------------------------------------------------------------------------
+# SmsProcessor.sync_queue
+# ---------------------------------------------------------------------------
+
+def test_sync_queue_executes_three_statements():
+    """sync_queue runs 2 INSERT statements + 1 UPDATE for opt-outs."""
+    from modules.sms_processor import SmsProcessor
+
+    engine, conn = make_engine_mock(rowcount=2)
+    processor = SmsProcessor(config=make_config(), engine=engine)
+    processor.sync_queue()
+
+    assert conn.execute.call_count == 3
+
+
+# ---------------------------------------------------------------------------
+# SmsProcessor.get_due_messages
+# ---------------------------------------------------------------------------
+
+def test_get_due_messages_returns_list_of_dicts():
+    from modules.sms_processor import SmsProcessor
+
+    row = MagicMock()
+    row._asdict.return_value = {
+        'id': 1, 'subjid': 'IBIS001', 'mobile_number': '0700000001',
+        'arm_text': 'HIV Risk Assessment', 'language': 'English',
+        'week': 8, 'appointment_date': None,
+    }
+    engine, conn = make_engine_mock(fetchall_return=[row])
+    processor = SmsProcessor(config=make_config(), engine=engine)
+    result = processor.get_due_messages()
+
+    assert len(result) == 1
+    assert result[0]['subjid'] == 'IBIS001'
+
+
+# ---------------------------------------------------------------------------
+# SmsProcessor.send_due_messages — dry run
+# ---------------------------------------------------------------------------
+
+def test_send_due_messages_dry_run_skips_all():
+    from modules.sms_processor import SmsProcessor
+
+    row = MagicMock()
+    row._asdict.return_value = {
+        'id': 1, 'subjid': 'IBIS001', 'mobile_number': '0700000001',
+        'arm_text': 'HIV Risk Assessment', 'language': 'English',
+        'week': 8, 'appointment_date': None,
+    }
+    template_row = MagicMock()
+    template_row.message_text = 'Please visit the clinic.'
+    template_row.has_placeholder = False
+
+    engine, conn = make_engine_mock()
+    # get_due_messages returns one row; _resolve_template returns template
+    conn.execute.return_value.fetchall.return_value = [row]
+    conn.execute.return_value.fetchone.return_value = template_row
+
+    processor = SmsProcessor(config=make_config(dry_run=True), engine=engine)
+    result = processor.send_due_messages()
+
+    assert result.sent == 0
+    assert result.skipped == 1
+    assert result.failed == 0
+
+
+# ---------------------------------------------------------------------------
+# SmsProcessor.send_due_messages — missing template skips row
+# ---------------------------------------------------------------------------
+
+def test_send_due_messages_missing_template_skips():
+    from modules.sms_processor import SmsProcessor
+
+    row = MagicMock()
+    row._asdict.return_value = {
+        'id': 2, 'subjid': 'IBIS002', 'mobile_number': '0700000002',
+        'arm_text': 'Unknown Arm', 'language': 'Klingon',
+        'week': 8, 'appointment_date': None,
+    }
+    engine, conn = make_engine_mock()
+    conn.execute.return_value.fetchall.return_value = [row]
+    conn.execute.return_value.fetchone.return_value = None  # no template found
+
+    processor = SmsProcessor(config=make_config(), engine=engine)
+    result = processor.send_due_messages()
+
+    assert result.skipped == 1
+    assert result.sent == 0

@@ -114,3 +114,256 @@ class BlastaClient:
                 else:
                     raise
         raise requests.RequestException(f"All {self._max_retries} attempts failed for {phone_number}")
+
+
+# ---------------------------------------------------------------------------
+# Result type
+# ---------------------------------------------------------------------------
+
+@dataclass
+class SendResult:
+    sent: int = 0
+    failed: int = 0
+    skipped: int = 0
+    failures: list[dict] = field(default_factory=list)
+
+
+# ---------------------------------------------------------------------------
+# SMS Processor
+# ---------------------------------------------------------------------------
+
+class SmsProcessor:
+    def __init__(self, config, engine: Engine):
+        self._config = config
+        self._engine = engine
+        sms_cfg = config.get('sms') or {}
+        self._max_retries = sms_cfg.get('max_retries', 3)
+        self._dry_run = sms_cfg.get('dry_run', False)
+        self._client: BlastaClient | None = None
+
+    def _get_client(self) -> BlastaClient:
+        if self._client is None:
+            sms_cfg = self._config.get('sms') or {}
+            username, password = _load_blasta_creds(
+                sms_cfg['blasta_ini'], sms_cfg['blasta_key']
+            )
+            self._client = BlastaClient(username, password, self._max_retries)
+        return self._client
+
+    # ------------------------------------------------------------------
+    # Phase 1: sync queue from ibis.baseline
+    # ------------------------------------------------------------------
+
+    def sync_queue(self) -> int:
+        """Upsert sms.queue from ibis.baseline (Uganda only). Returns rows inserted."""
+        with self._engine.begin() as conn:
+            r8 = conn.execute(text("""
+                INSERT INTO sms.queue
+                    (subjid, mobile_number, arm_text, language,
+                     week, scheduled_date, appointment_date)
+                SELECT
+                    subjid,
+                    mobile_number,
+                    arm_text,
+                    preferred_language_text,
+                    8,
+                    sms_schedule_8weeks,
+                    dflt_appt_arm_schd_appt_date
+                FROM ibis.baseline
+                WHERE countrycode = 1
+                  AND sms_schedule_8weeks IS NOT NULL
+                  AND mobile_number IS NOT NULL
+                ON CONFLICT (subjid, week) DO NOTHING
+            """))
+            r11 = conn.execute(text("""
+                INSERT INTO sms.queue
+                    (subjid, mobile_number, arm_text, language,
+                     week, scheduled_date, appointment_date)
+                SELECT
+                    subjid,
+                    mobile_number,
+                    arm_text,
+                    preferred_language_text,
+                    11,
+                    sms_schedule_11weeks,
+                    dflt_appt_arm_schd_appt_date
+                FROM ibis.baseline
+                WHERE countrycode = 1
+                  AND sms_schedule_11weeks IS NOT NULL
+                  AND mobile_number IS NOT NULL
+                ON CONFLICT (subjid, week) DO NOTHING
+            """))
+            conn.execute(text("""
+                UPDATE sms.queue SET opted_out = TRUE
+                WHERE subjid IN (SELECT subjid FROM sms.opt_outs)
+                  AND opted_out = FALSE
+            """))
+            inserted = (r8.rowcount or 0) + (r11.rowcount or 0)
+        logger.info("sync_queue: %d new row(s) inserted", inserted)
+        return inserted
+
+    # ------------------------------------------------------------------
+    # Phase 2: find messages due today
+    # ------------------------------------------------------------------
+
+    def get_due_messages(self) -> list[dict]:
+        """Return pending, non-opted-out queue rows scheduled for today."""
+        with self._engine.connect() as conn:
+            rows = conn.execute(text("""
+                SELECT q.id, q.subjid, q.mobile_number, q.arm_text, q.language,
+                       q.week, q.appointment_date
+                FROM sms.queue q
+                WHERE q.scheduled_date = CURRENT_DATE
+                  AND q.status = 'pending'
+                  AND q.opted_out = FALSE
+                  AND NOT EXISTS (
+                      SELECT 1 FROM sms.log l
+                      WHERE l.subjid = q.subjid
+                        AND l.week   = q.week
+                        AND l.status = 'sent'
+                  )
+            """)).fetchall()
+        return [row._asdict() for row in rows]
+
+    # ------------------------------------------------------------------
+    # Phase 3: resolve template → send → log
+    # ------------------------------------------------------------------
+
+    def _resolve_template(self, arm_text: str, language: str, week: int) -> tuple[str, bool] | None:
+        """Return (message_text, has_placeholder) or None if not found."""
+        with self._engine.connect() as conn:
+            row = conn.execute(text("""
+                SELECT message_text, has_placeholder
+                FROM sms.templates
+                WHERE arm = :arm AND language = :language AND week = :week
+            """), {"arm": arm_text, "language": language, "week": week}).fetchone()
+        if row is None:
+            logger.warning(
+                "No template for arm=%s language=%s week=%d — skipping",
+                arm_text, language, week,
+            )
+            return None
+        return row.message_text, row.has_placeholder
+
+    def _log_attempt(self, *, queue_id: int, subjid: str, mobile_number: str,
+                     week: int, message_text: str, attempt: int, status: str,
+                     provider_message_id: str | None, error_message: str | None) -> None:
+        with self._engine.begin() as conn:
+            conn.execute(text("""
+                INSERT INTO sms.log
+                    (queue_id, subjid, mobile_number, week, message_text,
+                     attempt, status, provider_message_id, error_message, sent_at)
+                VALUES
+                    (:queue_id, :subjid, :mobile_number, :week, :message_text,
+                     :attempt, :status, :provider_message_id, :error_message,
+                     CASE WHEN :status2 = 'sent' THEN NOW() ELSE NULL END)
+            """), {
+                "queue_id": queue_id, "subjid": subjid,
+                "mobile_number": mobile_number, "week": week,
+                "message_text": message_text, "attempt": attempt,
+                "status": status, "status2": status,
+                "provider_message_id": provider_message_id,
+                "error_message": error_message,
+            })
+
+    def _update_queue_status(self, queue_id: int, status: str) -> None:
+        with self._engine.begin() as conn:
+            conn.execute(
+                text("UPDATE sms.queue SET status = :status WHERE id = :id"),
+                {"status": status, "id": queue_id},
+            )
+
+    def send_due_messages(self) -> SendResult:
+        """Send all messages due today. Returns SendResult."""
+        due = self.get_due_messages()
+        logger.info("Found %d message(s) due today", len(due))
+
+        result = SendResult()
+
+        for row in due:
+            template = self._resolve_template(row['arm_text'], row['language'], row['week'])
+            if template is None:
+                result.skipped += 1
+                self._update_queue_status(row['id'], 'skipped')
+                continue
+
+            message, has_placeholder = template
+            if has_placeholder:
+                message = _substitute_placeholder(message, row.get('appointment_date'))
+
+            if self._dry_run:
+                logger.info(
+                    "[DRY RUN] Would send to %s (week %d): %.60s",
+                    row['mobile_number'], row['week'], message,
+                )
+                result.skipped += 1
+                continue
+
+            provider_msg_id = None
+            error_msg = None
+            success = False
+
+            try:
+                response = self._get_client().send(str(row['mobile_number']), message)
+                provider_msg_id = response.get('msg_id')
+                success = True
+                result.sent += 1
+                logger.info("Sent to %s (week %d) msg_id=%s", row['mobile_number'], row['week'], provider_msg_id)
+            except Exception as exc:
+                error_msg = str(exc)
+                result.failed += 1
+                result.failures.append({
+                    'subjid': row['subjid'],
+                    'mobile_number': str(row['mobile_number']),
+                    'week': row['week'],
+                    'error': error_msg,
+                })
+                logger.error("Failed to send to %s (week %d): %s", row['mobile_number'], row['week'], exc)
+
+            self._log_attempt(
+                queue_id=row['id'],
+                subjid=row['subjid'],
+                mobile_number=str(row['mobile_number']),
+                week=row['week'],
+                message_text=message,
+                attempt=1,
+                status='sent' if success else 'failed',
+                provider_message_id=provider_msg_id,
+                error_message=error_msg,
+            )
+            self._update_queue_status(row['id'], 'sent' if success else 'failed')
+
+        return result
+
+    # ------------------------------------------------------------------
+    # Main entry point
+    # ------------------------------------------------------------------
+
+    def run(self) -> SendResult:
+        """Full daily run: sync queue then send due messages."""
+        self.sync_queue()
+        return self.send_due_messages()
+
+    # ------------------------------------------------------------------
+    # Weekly report data
+    # ------------------------------------------------------------------
+
+    def get_weekly_report_data(self) -> list[dict]:
+        """Return SMS activity for the past 7 days grouped by facility and week."""
+        with self._engine.connect() as conn:
+            rows = conn.execute(text("""
+                SELECT
+                    b.health_facility_ug,
+                    l.week,
+                    COUNT(*) FILTER (WHERE l.status = 'sent')   AS sent,
+                    COUNT(*) FILTER (WHERE l.status = 'failed') AS failed,
+                    COUNT(*) FILTER (WHERE q.opted_out = TRUE)  AS opted_out
+                FROM sms.log l
+                JOIN sms.queue    q ON q.id      = l.queue_id
+                JOIN ibis.baseline b ON b.subjid = l.subjid
+                WHERE l.created_at >= NOW() - INTERVAL '7 days'
+                  AND b.countrycode = 1
+                GROUP BY b.health_facility_ug, l.week
+                ORDER BY b.health_facility_ug, l.week
+            """)).fetchall()
+        return [row._asdict() for row in rows]
