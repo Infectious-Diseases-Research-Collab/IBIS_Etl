@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 import os
+from pathlib import Path
 
 from sqlalchemy import create_engine, text
 from sqlalchemy.engine import Engine, URL
@@ -37,3 +38,11 @@ def init_schemas(engine: Engine) -> None:
             logger.debug('Schema ready: %s', schema)
         conn.commit()
     logger.info('Initialised schemas: %s', SCHEMAS)
+
+
+def init_sms_tables(engine: Engine) -> None:
+    """Create SMS tables from sql/sms/init_sms_schema.sql (idempotent — IF NOT EXISTS)."""
+    sql_path = Path(__file__).parent.parent / 'sql' / 'sms' / 'init_sms_schema.sql'
+    with engine.begin() as conn:
+        conn.execute(text(sql_path.read_text()))
+    logger.debug('SMS tables ready.')

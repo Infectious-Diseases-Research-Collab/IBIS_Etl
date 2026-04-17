@@ -13,10 +13,9 @@ from __future__ import annotations
 import argparse
 import logging
 import sys
-from pathlib import Path
 
 from modules.config import ConfigLoader
-from modules.db import create_db_engine, init_schemas
+from modules.db import create_db_engine, init_schemas, init_sms_tables
 from modules.notifier import send_sms_weekly_report
 from modules.sms_processor import SmsProcessor
 
@@ -28,14 +27,8 @@ logger = logging.getLogger(__name__)
 
 
 def init_db(engine) -> None:
-    """Create SMS tables from sql/sms/init_sms_schema.sql."""
-    sql_path = Path('sql/sms/init_sms_schema.sql')
-    if not sql_path.exists():
-        logger.error("Schema file not found: %s", sql_path)
-        sys.exit(1)
-    from sqlalchemy import text
-    with engine.begin() as conn:
-        conn.execute(text(sql_path.read_text()))
+    """Create SMS tables (delegates to db.init_sms_tables)."""
+    init_sms_tables(engine)
     logger.info("SMS tables created (or already existed).")
 
 
