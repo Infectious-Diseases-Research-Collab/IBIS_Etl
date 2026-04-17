@@ -167,11 +167,14 @@ class SmsProcessor:
                     arm_text,
                     preferred_language_text,
                     8,
-                    sms_schedule_8weeks,
-                    dflt_appt_arm_schd_appt_date
+                    TO_DATE(sms_schedule_8weeks, 'DD/MM/YYYY HH24:MI:SS'),
+                    CASE WHEN LEFT(dflt_appt_arm_schd_appt_date, 2) = '00' THEN NULL
+                         ELSE TO_DATE(dflt_appt_arm_schd_appt_date, 'DD/MM/YYYY HH24:MI:SS')
+                    END
                 FROM ibis.baseline
                 WHERE countrycode = '1'
                   AND sms_schedule_8weeks IS NOT NULL
+                  AND LEFT(sms_schedule_8weeks, 2) != '00'
                   AND mobile_number IS NOT NULL
                 ON CONFLICT (subjid, week) DO NOTHING
             """))
@@ -185,11 +188,14 @@ class SmsProcessor:
                     arm_text,
                     preferred_language_text,
                     11,
-                    sms_schedule_11weeks,
-                    dflt_appt_arm_schd_appt_date
+                    TO_DATE(sms_schedule_11weeks, 'DD/MM/YYYY HH24:MI:SS'),
+                    CASE WHEN LEFT(dflt_appt_arm_schd_appt_date, 2) = '00' THEN NULL
+                         ELSE TO_DATE(dflt_appt_arm_schd_appt_date, 'DD/MM/YYYY HH24:MI:SS')
+                    END
                 FROM ibis.baseline
                 WHERE countrycode = '1'
                   AND sms_schedule_11weeks IS NOT NULL
+                  AND LEFT(sms_schedule_11weeks, 2) != '00'
                   AND mobile_number IS NOT NULL
                 ON CONFLICT (subjid, week) DO NOTHING
             """))
