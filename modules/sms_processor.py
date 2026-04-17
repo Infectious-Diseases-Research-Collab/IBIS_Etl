@@ -120,7 +120,12 @@ class BlastaClient:
                     self._token = self._get_token()
                     continue
                 resp.raise_for_status()
-                return resp.json()
+                body = resp.json()
+                # Extract msg_id from Detail[0] if present
+                detail = body.get('Detail', [])
+                if detail:
+                    body['msg_id'] = detail[0].get('msg_id')
+                return body
             except requests.RequestException as exc:
                 if attempt < self._max_retries - 1:
                     wait = 2 ** attempt
