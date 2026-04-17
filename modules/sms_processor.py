@@ -170,7 +170,7 @@ class SmsProcessor:
                     sms_schedule_8weeks,
                     dflt_appt_arm_schd_appt_date
                 FROM ibis.baseline
-                WHERE countrycode = 1
+                WHERE countrycode = '1'
                   AND sms_schedule_8weeks IS NOT NULL
                   AND mobile_number IS NOT NULL
                 ON CONFLICT (subjid, week) DO NOTHING
@@ -188,7 +188,7 @@ class SmsProcessor:
                     sms_schedule_11weeks,
                     dflt_appt_arm_schd_appt_date
                 FROM ibis.baseline
-                WHERE countrycode = 1
+                WHERE countrycode = '1'
                   AND sms_schedule_11weeks IS NOT NULL
                   AND mobile_number IS NOT NULL
                 ON CONFLICT (subjid, week) DO NOTHING
