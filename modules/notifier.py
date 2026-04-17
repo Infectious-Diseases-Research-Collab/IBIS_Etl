@@ -243,10 +243,10 @@ def _build_sms_summary(results: dict[str, 'StageResult']) -> str | None:
     if failures:
         lines.append('')
         lines.append('  Failed messages:')
-        for f in failures:
+        for failure in failures:
             lines.append(
-                f"    subjid={f['subjid']}  mobile={f['mobile_number']}"
-                f"  week={f['week']}  error: {f['error']}"
+                f"    subjid={failure['subjid']}  mobile={failure['mobile_number']}"
+                f"  week={failure['week']}  error: {failure['error']}"
             )
     lines.append(sep)
     return '\n'.join(lines)
@@ -271,7 +271,8 @@ def _build_weekly_sms_report(rows: list[dict], week_ending: str) -> str:
         total_opted  += row['opted_out']
 
     lines.append(sep)
-    lines.append(f'{"Total":<36} {total_sent:>6} {total_failed:>7} {total_opted:>8}')
+    # Total row: facility+week columns combined (35 chars) to match data row width
+    lines.append(f'{"Total":<35} {total_sent:>6} {total_failed:>7} {total_opted:>8}')
     lines.append(sep)
     return '\n'.join(lines)
 
@@ -292,9 +293,12 @@ def send_sms_weekly_report(engine, config) -> None:
         logger.warning("No Uganda field recipients configured — weekly SMS report not sent.")
         return
 
-    from modules.sms_processor import SmsProcessor
+    from modules.sms_processor import SmsProcessor  # late import to avoid circular dependency
     processor = SmsProcessor(config=config, engine=engine)
     rows = processor.get_weekly_report_data()
+    if not rows:
+        logger.info("No SMS activity in the past 7 days — weekly report not sent.")
+        return
 
     today = date.today().strftime('%d %b %Y')
     subject = f'IBIS SMS Weekly Report \u2014 week ending {today}'

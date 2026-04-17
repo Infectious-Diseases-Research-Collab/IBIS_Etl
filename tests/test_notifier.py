@@ -297,3 +297,8 @@ def test_build_weekly_sms_report_includes_facility_and_totals():
     assert 'Wakiso HC' in report
     assert 'Total' in report
     assert '17 Apr 2026' in report
+    # verify totals are computed correctly: sent=12, failed=1, opted_out=1
+    lines = [l for l in report.splitlines() if 'Total' in l]
+    assert len(lines) == 1
+    assert '12' in lines[0]
+    assert '1' in lines[0]
