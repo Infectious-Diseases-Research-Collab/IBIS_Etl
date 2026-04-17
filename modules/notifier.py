@@ -164,6 +164,12 @@ def send_pipeline_report(
     # Query once — used for both field email trigger and body
     report_df = _query_validation_report(engine)
 
+    # Merge any stage-level warnings (e.g. corrupt archives) into the report.
+    stage_warnings = [w for r in results.values() for w in r.warnings]
+    if stage_warnings:
+        warnings_df = pd.DataFrame(stage_warnings)
+        report_df = pd.concat([warnings_df, report_df], ignore_index=True) if report_df is not None else warnings_df
+
     # Filter validation report to configured countries (if specified)
     notify_countries = email_cfg.get('notify_countries')
     if notify_countries and report_df is not None:
