@@ -16,7 +16,7 @@ def test_init_schemas_creates_all_schemas():
     mock_conn.commit.assert_called_once()
 
 def test_schemas_list_contains_all_layers():
-    assert set(SCHEMAS) == {'bronze_ibis', 'silver_ibis', 'gold_ibis', 'ibis', 'store_ibis'}
+    assert set(SCHEMAS) == {'bronze_ibis', 'silver_ibis', 'gold_ibis', 'ibis', 'store_ibis', 'sms'}
 
 def test_create_db_engine_reads_secret_file(tmp_path):
     secret_file = tmp_path / 'db_password'

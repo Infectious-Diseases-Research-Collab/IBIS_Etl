@@ -41,7 +41,9 @@
   },
   "schedule": {
     "pipeline_cron": "0 2 * * *",
-    "store_cron": "0 3 * * 0"
+    "store_cron": "0 3 * * 0",
+    "sms_cron":               "0 9 * * *",
+    "sms_weekly_report_cron": "0 7 * * 1"
   },
   "email": {
     "smtp_host": "smtp.example.com",
@@ -58,5 +60,12 @@
       "smtp_ini": "secrets/SMTP.ini",
       "smtp_key": "secrets/SMTP.key"
     }
+  },
+  "sms": {
+    "messages_dir": "data/sms_messages",
+    "blasta_ini":   "secrets/BLASTA.ini",
+    "blasta_key":   "secrets/BLASTA.key",
+    "max_retries":  3,
+    "dry_run":      false
   }
 }
