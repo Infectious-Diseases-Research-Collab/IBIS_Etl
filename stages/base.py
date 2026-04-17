@@ -8,6 +8,8 @@ class StageResult:
     success: bool
     rows_written: int = 0
     errors: list[str] = field(default_factory=list)
+    warnings: list[dict] = field(default_factory=list)
+    metadata: dict = field(default_factory=dict)
 
 
 class BaseStage:
