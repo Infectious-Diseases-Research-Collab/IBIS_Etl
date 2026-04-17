@@ -15,6 +15,24 @@ logger = logging.getLogger(__name__)
 
 BLASTA_BASE_URL = "https://sms.dmarkmobile.com/v3/api"
 
+# Maps raw values from ibis.baseline → canonical values in sms.templates
+_LANGUAGE_MAP: dict[str, str] = {
+    'english':    'English',
+    'luganda':    'Luganda',
+    'runyonkole': 'Runyankole',
+    'runyankole': 'Runyankole',
+}
+
+_ARM_MAP: dict[str, str] = {
+    'community benefits':                  'Community benefits',
+    'education-based':                     'Education-based 1',
+    'hiv risk assessment':                 'HIV Risk Assessment',
+    'social norms - default':              'Social Norms',
+    'social norms - sex-age-matched':      'Social Norms',
+    'u=u messaging':                       'U=U Messaging',
+    'reserved for you':                    '"Reserved for you" Messaging',
+}
+
 
 # ---------------------------------------------------------------------------
 # Credential loading (follows existing Fernet .ini/.key pattern)
@@ -237,16 +255,18 @@ class SmsProcessor:
 
     def _resolve_template(self, arm_text: str, language: str, week: int) -> tuple[str, bool] | None:
         """Return (message_text, has_placeholder) or None if not found."""
+        canonical_language = _LANGUAGE_MAP.get(language.lower(), language)
+        canonical_arm = _ARM_MAP.get(arm_text.lower(), arm_text)
         with self._engine.connect() as conn:
             row = conn.execute(text("""
                 SELECT message_text, has_placeholder
                 FROM sms.templates
                 WHERE arm = :arm AND language = :language AND week = :week
-            """), {"arm": arm_text, "language": language, "week": week}).fetchone()
+            """), {"arm": canonical_arm, "language": canonical_language, "week": week}).fetchone()
         if row is None:
             logger.warning(
                 "No template for arm=%s language=%s week=%d — skipping",
-                arm_text, language, week,
+                canonical_arm, canonical_language, week,
             )
             return None
         return row.message_text, row.has_placeholder
