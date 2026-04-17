@@ -16,6 +16,7 @@ from stages.transform_ibis import TransformIbis
 from stages.measures_ibis import MeasuresIbis
 from stages.promote_ibis import PromoteIbis
 from stages.store_ibis import StoreIbis
+from stages.send_sms import SendSms
 
 from modules.notifier import send_pipeline_report
 
@@ -33,6 +34,7 @@ STAGE_CLASSES = {
     'measures_ibis':    MeasuresIbis,
     'promote_ibis':     PromoteIbis,
     'store_ibis':       StoreIbis,
+    'send_sms':         SendSms,
 }
 
 STAGE_DEPS = {name: cls.dependencies for name, cls in STAGE_CLASSES.items()}
