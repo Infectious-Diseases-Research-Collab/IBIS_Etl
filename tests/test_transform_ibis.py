@@ -13,7 +13,7 @@ def test_load_sql_files_returns_sorted_paths(tmp_path):
 
 
 def test_transform_ibis_executes_all_sql_files(tmp_path):
-    (tmp_path / 'd_participant.sql').write_text('CREATE TABLE gold_ibis.d_participant AS SELECT 1')
+    (tmp_path / 'baseline.sql').write_text('CREATE TABLE gold_ibis.baseline AS SELECT 1')
 
     engine = MagicMock()
     mock_conn = MagicMock()
