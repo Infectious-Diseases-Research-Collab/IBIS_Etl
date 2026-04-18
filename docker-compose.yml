@@ -43,8 +43,20 @@ services:
       - ./secrets:/app/secrets:ro
       - ./Downloads:/app/Downloads
       - ./Extracted:/app/Extracted
+      - ./logs:/var/log/ibis
     command: ["cron", "-f"]
-    restart: unless-stopped
+    restart: on-failure:3
+    healthcheck:
+      test: ["CMD-SHELL", "pgrep cron || exit 1"]
+      interval: 60s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
+    deploy:
+      resources:
+        limits:
+          memory: 2G
+          cpus: "2"
 
 secrets:
   db_password:
