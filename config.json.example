@@ -62,6 +62,7 @@
     }
   },
   "sms": {
+    "countrycode":  "1",
     "messages_dir": "data/sms_messages",
     "blasta_ini":   "secrets/BLASTA.ini",
     "blasta_key":   "secrets/BLASTA.key",

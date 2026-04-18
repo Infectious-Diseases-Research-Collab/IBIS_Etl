@@ -256,6 +256,30 @@ def test_sync_queue_executes_three_statements():
     assert conn.execute.call_count == 3
 
 
+def test_sync_queue_uses_countrycode_from_config():
+    """Countrycode is read from config, not hardcoded."""
+    from modules.sms_processor import SmsProcessor
+
+    engine, conn = make_engine_mock(rowcount=2)
+
+    cfg = MagicMock()
+    cfg.get.return_value = {
+        'blasta_ini': 'secrets/BLASTA.ini',
+        'blasta_key': 'secrets/BLASTA.key',
+        'max_retries': 3,
+        'dry_run': False,
+        'countrycode': '2',  # non-Uganda country
+    }
+
+    processor = SmsProcessor(config=cfg, engine=engine)
+    processor.sync_queue()
+
+    executed_sql = [str(c.args[0]) for c in conn.execute.call_args_list]
+    # The hardcoded '1' must NOT appear in any SQL — must be a bind parameter
+    assert not any("countrycode = '1'" in s for s in executed_sql), \
+        "countrycode '1' is hardcoded — must be passed as a bind parameter"
+
+
 # ---------------------------------------------------------------------------
 # SmsProcessor.get_due_messages
 # ---------------------------------------------------------------------------

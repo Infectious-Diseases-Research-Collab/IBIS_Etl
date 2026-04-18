@@ -162,6 +162,7 @@ class SmsProcessor:
         sms_cfg = config.get('sms') or {}
         self._max_retries = sms_cfg.get('max_retries', 3)
         self._dry_run = sms_cfg.get('dry_run', False)
+        self._countrycode = sms_cfg.get('countrycode', '1')
         self._client: BlastaClient | None = None
 
     def _get_client(self) -> BlastaClient:
@@ -195,12 +196,12 @@ class SmsProcessor:
                          ELSE TO_DATE(dflt_appt_arm_schd_appt_date, 'DD/MM/YYYY HH24:MI:SS')
                     END
                 FROM ibis.baseline
-                WHERE countrycode = '1'
+                WHERE countrycode = :countrycode
                   AND sms_schedule_8weeks IS NOT NULL
                   AND LEFT(sms_schedule_8weeks, 2) != '00'
                   AND mobile_number IS NOT NULL
                 ON CONFLICT (subjid, week) DO NOTHING
-            """))
+            """), {"countrycode": self._countrycode})
             r11 = conn.execute(text("""
                 INSERT INTO sms.queue
                     (subjid, mobile_number, arm_text, language,
@@ -216,12 +217,12 @@ class SmsProcessor:
                          ELSE TO_DATE(dflt_appt_arm_schd_appt_date, 'DD/MM/YYYY HH24:MI:SS')
                     END
                 FROM ibis.baseline
-                WHERE countrycode = '1'
+                WHERE countrycode = :countrycode
                   AND sms_schedule_11weeks IS NOT NULL
                   AND LEFT(sms_schedule_11weeks, 2) != '00'
                   AND mobile_number IS NOT NULL
                 ON CONFLICT (subjid, week) DO NOTHING
-            """))
+            """), {"countrycode": self._countrycode})
             conn.execute(text("""
                 UPDATE sms.queue SET opted_out = TRUE
                 WHERE subjid IN (SELECT subjid FROM sms.opt_outs)
@@ -393,8 +394,8 @@ class SmsProcessor:
                 JOIN sms.queue    q ON q.id      = l.queue_id
                 JOIN ibis.baseline b ON b.subjid = l.subjid
                 WHERE l.created_at >= NOW() - INTERVAL '7 days'
-                  AND b.countrycode = 1
+                  AND b.countrycode = :countrycode
                 GROUP BY b.health_facility_ug, l.week
                 ORDER BY b.health_facility_ug, l.week
-            """)).fetchall()
+            """), {"countrycode": self._countrycode}).fetchall()
         return [row._asdict() for row in rows]
