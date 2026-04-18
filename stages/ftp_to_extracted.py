@@ -55,10 +55,14 @@ def _process_tablet(
     download_dir: str,
     extract_dir: str,
     country: str,
-) -> tuple[int, str | None]:
+) -> tuple[int, str | None, dict | None]:
     """
     Download, extract and delete one tablet archive.
-    Returns (1, None) on success, (0, None) if skipped, (0, error_msg) on failure.
+    Returns:
+      (1, None, None)           — success
+      (0, None, None)           — skipped (already extracted)
+      (0, error_msg, None)      — fatal: SFTP/download failure
+      (0, None, warning_dict)   — non-fatal: corrupt archive (bad header etc.)
     Each call uses its own SFTP connection — safe to run concurrently.
     """
     folder_name = filename[:-3]  # strip .7z
@@ -66,30 +70,46 @@ def _process_tablet(
 
     if os.path.exists(tablet_extract_dir):
         logger.info(f"[{country}] Skipping {filename} — already extracted.")
-        return 0, None
+        return 0, None, None
 
     local_archive = os.path.join(download_dir, filename)
     try:
         # Retry download on network errors (e.g. Mismatched MAC).
-        # Extraction errors are not retried — a corrupt archive
-        # won't be fixed by re-downloading the same file.
         _download_with_retry(
             hostname, username, ftp_password,
             remote_path, filename, local_archive,
         )
+    except Exception as exc:
+        msg = f"[{country}] Failed to download '{filename}': {exc}"
+        logger.error(msg)
+        if os.path.exists(local_archive):
+            os.remove(local_archive)
+        return 0, msg, None
+
+    try:
         with py7zr.SevenZipFile(
             local_archive, mode='r', password=sevenz_password
         ) as archive:
             archive.extractall(path=tablet_extract_dir)
         os.remove(local_archive)
         logger.info(f"[{country}] Extracted {filename} → {tablet_extract_dir}")
-        return 1, None
+        return 1, None, None
     except Exception as exc:
-        msg = f"[{country}] Failed to process '{filename}': {exc}"
-        logger.error(msg)
+        logger.warning(f"[{country}] Corrupt archive '{filename}': {exc} — skipping.")
         if os.path.exists(local_archive):
             os.remove(local_archive)
-        return 0, msg
+        warning = dict(
+            check='corrupt_archive',
+            severity='ERROR',
+            country=country,
+            site=None,
+            field='archive',
+            record_count=1,
+            detail=f"Archive '{filename}' could not be extracted: {exc}",
+            affected_subjids=None,
+            affected_tablets=filename,
+        )
+        return 0, None, warning
 
 
 class FtpToExtracted(BaseStage):
@@ -114,6 +134,7 @@ class FtpToExtracted(BaseStage):
 
         total_downloaded = 0
         errors: list[str] = []
+        warnings: list[dict] = []
 
         for community_key, community in communities.items():
             country = community['country']
@@ -146,20 +167,23 @@ class FtpToExtracted(BaseStage):
                         for filename in sorted(latest.values())
                     }
                     for future in as_completed(futures):
-                        downloaded, error_msg = future.result()
+                        downloaded, error_msg, warning = future.result()
                         total_downloaded += downloaded
                         if error_msg:
                             errors.append(error_msg)
+                        if warning:
+                            warnings.append(warning)
 
             except Exception as exc:
                 msg = f"[{country}] SFTP connection failed: {exc}"
                 logger.error(msg)
                 errors.append(msg)
 
-        # Partial success: downstream stages run if at least one tablet was
-        # extracted. Errors are still reported in the pipeline summary.
+        # Stage succeeds unless there are fatal (download/SFTP) errors.
+        # Corrupt archives are non-blocking and surfaced via warnings.
         return StageResult(
-            success=total_downloaded > 0 or len(errors) == 0,
+            success=len(errors) == 0,
             rows_written=total_downloaded,
             errors=errors,
+            warnings=warnings,
         )
