@@ -32,3 +32,18 @@ def test_create_db_engine_reads_secret_file(tmp_path):
         assert url.password == 'secret'
         assert url.host == 'localhost'
         assert mock_create.call_args[1].get('pool_pre_ping') is True
+
+def test_create_db_engine_sets_statement_timeout(tmp_path):
+    secret_file = tmp_path / 'db_password'
+    secret_file.write_text('secret')
+    config = MagicMock()
+    config.get.return_value = {
+        'host': 'localhost', 'port': 5432, 'name': 'ibis',
+        'user': 'ibis_user', 'password_secret_file': str(secret_file)
+    }
+    with patch('modules.db.create_engine') as mock_create:
+        create_db_engine(config)
+        connect_args = mock_create.call_args[1].get('connect_args', {})
+        options = connect_args.get('options', '')
+        assert 'statement_timeout' in options
+        assert 'lock_timeout' in options
