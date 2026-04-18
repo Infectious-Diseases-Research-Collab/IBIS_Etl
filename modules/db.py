@@ -27,7 +27,13 @@ def create_db_engine(config) -> Engine:
         port=db['port'],
         database=db['name'],
     )
-    return create_engine(url, pool_pre_ping=True)
+    return create_engine(
+        url,
+        pool_pre_ping=True,
+        connect_args={
+            "options": "-c statement_timeout=300000 -c lock_timeout=30000"
+        },
+    )
 
 
 def init_schemas(engine: Engine) -> None:
