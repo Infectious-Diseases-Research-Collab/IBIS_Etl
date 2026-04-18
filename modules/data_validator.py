@@ -62,6 +62,8 @@ logger = logging.getLogger(__name__)
 
 # -9 is inserted by the tablet software when a question is skipped via skip logic.
 _SYSTEM_SKIP = -9
+# -7 is the "don't know" response code.
+_DONT_KNOW = -7
 
 
 class DataValidator:
@@ -344,7 +346,7 @@ class DataValidator:
             return issues
         age = pd.to_numeric(df['respondants_age'], errors='coerce')
         bad = age.dropna()
-        bad = bad[~(((bad >= 10) & (bad <= 110)) | (bad == -9) | (bad == self.skip_code))]
+        bad = bad[~(((bad >= 10) & (bad <= 110)) | (bad == _DONT_KNOW) | (bad == self.skip_code))]
         if not bad.empty:
             bad_vals = [int(v) for v in sorted(bad.unique())]
             issues.append(dict(
@@ -685,6 +687,7 @@ class DataValidator:
 
         pair_count = 0
         affected_idx: list = []
+        phone_pairs: list[tuple[str, str]] = []
 
         for grp in by_length.values():
             if len(grp) < 2:
@@ -700,6 +703,7 @@ class DataValidator:
                 pair_count += int(one_off.sum())
                 for r, c in zip(rows[one_off].tolist(), cols[one_off].tolist()):
                     affected_idx.extend([grp_indices[r], grp_indices[c]])
+                    phone_pairs.append((grp_phones[r], grp_phones[c]))
             else:
                 for i in range(len(grp_phones)):
                     for j in range(i + 1, len(grp_phones)):
@@ -707,10 +711,12 @@ class DataValidator:
                         if sum(ca != cb for ca, cb in zip(a, b)) == 1:
                             pair_count += 1
                             affected_idx.extend([grp_indices[i], grp_indices[j]])
+                            phone_pairs.append((a, b))
 
         if not pair_count:
             return []
         affected_idx_unique = list(dict.fromkeys(affected_idx))  # deduplicate, preserve order
+        pairs_str = '; '.join(f"{a} / {b}" for a, b in phone_pairs)
         return [dict(
             check='similar_phone',
             severity='WARNING',
@@ -718,7 +724,7 @@ class DataValidator:
             record_count=pair_count,
             detail=(
                 f"{pair_count} pair(s) of mobile numbers differ by exactly "
-                f"one digit (possible transposition or typo)."
+                f"one digit (possible transposition or typo): {pairs_str}."
             ),
             affected_subjids=self._subjids_for_mask(df, affected_idx_unique),
             affected_tablets=self._tablets_for_mask(df, affected_idx_unique),
@@ -829,6 +835,9 @@ class DataValidator:
         # Sort by similarity descending so highest-risk pairs appear first
         pairs.sort(key=lambda x: x[4], reverse=True)
 
+        has_subjid = 'subjid' in df.columns
+        skip_str = str(self.skip_code)
+
         issues = []
         for name_a, name_b, idx_a, idx_b, sim in pairs:
             # Only flag when DOBs are present and identical — the key signal
@@ -841,6 +850,16 @@ class DataValidator:
                 dob_note = f" | DOB A: {dob_a.date()} | DOB B: {dob_b.date()}"
             else:
                 dob_note = ''
+
+            # Skip if both records share the same subjid — same participant,
+            # different name spellings across snapshots (not a duplicate enrolment).
+            if has_subjid:
+                def _clean_subjid(idx):
+                    v = self._strip_float_suffix(df.at[idx, 'subjid']) if idx in df.index else ''
+                    return v if v and v != skip_str and v.lower() != 'nan' else None
+                sid_a, sid_b = _clean_subjid(idx_a), _clean_subjid(idx_b)
+                if sid_a and sid_b and sid_a == sid_b:
+                    continue
 
             if has_tablet:
                 tab_a = df.at[idx_a, 'tabletnum'] if idx_a in df.index else ''
@@ -897,7 +916,16 @@ class DataValidator:
                 affected_tablets=self._tablets_for_mask(df, impossible),
             ))
 
-        enrolled = df['subjid'].notna() & (df['subjid'].astype(str).str.strip() != '')
+        skip_str = str(self.skip_code)
+        if 'subjid' in df.columns:
+            _subjid_str = df['subjid'].map(self._strip_float_suffix)
+            enrolled = (
+                df['subjid'].notna()
+                & (_subjid_str != '')
+                & (_subjid_str != skip_str)
+            )
+        else:
+            enrolled = pd.Series(False, index=df.index)
         too_short = both_valid & (delta_minutes >= 0) & (delta_minutes < 3) & enrolled
         if too_short.any():
             examples = [f"{m:.1f} min" for m in delta_minutes[too_short].head(5)]
@@ -986,7 +1014,7 @@ class DataValidator:
 
         if 'respondants_age' in df.columns:
             recorded_age = pd.to_numeric(df['respondants_age'], errors='coerce')
-            usable = valid_dob & recorded_age.notna() & (recorded_age != self.skip_code)
+            usable = valid_dob & recorded_age.notna() & (recorded_age != self.skip_code) & (recorded_age != _DONT_KNOW)
             age_diff = (derived_age - recorded_age).abs()
             mismatch = usable & (age_diff > 2)
             if mismatch.any():
