@@ -33,8 +33,8 @@ class DataCleaner:
         """
         Deduplicate records by *uniqueid*, the system-assigned unique survey
         session identifier.  When the same uniqueid appears multiple times
-        (e.g. because the same tablet snapshot was read from overlapping
-        archive files), only the copy with the most non-null fields is kept.
+        (e.g. because a field edit caused the file to be re-ingested), the
+        most recently extracted copy is kept.
         """
         df = self.df.copy()
 
@@ -46,11 +46,12 @@ class DataCleaner:
             logger.info("No uniqueid values found; skipping uniqueid deduplication.")
             return df
 
-        # Score each row by the number of non-null fields (more = more complete)
-        with_uid = with_uid.assign(_completeness=with_uid.notna().sum(axis=1))
-        with_uid_sorted = with_uid.sort_values('_completeness', ascending=False)
+        # Sort by extracted_at descending so the newest version of each record wins
+        if 'extracted_at' in with_uid.columns:
+            with_uid_sorted = with_uid.sort_values('extracted_at', ascending=False)
+        else:
+            with_uid_sorted = with_uid
         deduped = with_uid_sorted.drop_duplicates(subset=['uniqueid'], keep='first')
-        deduped = deduped.drop(columns=['_completeness'])
 
         before = len(with_uid)
         after = len(deduped)
