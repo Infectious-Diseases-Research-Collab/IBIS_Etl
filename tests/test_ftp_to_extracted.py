@@ -166,7 +166,8 @@ def test_per_tablet_extraction_failure_continues_other_tablets(tmp_path):
 
     assert result.success             # partial success — downstream should run
     assert result.rows_written == 1
-    assert len(result.errors) == 1
+    assert len(result.warnings) == 1  # corrupt archive is a warning, not a hard error
+    assert result.warnings[0]['check'] == 'corrupt_archive'
 
 
 def test_all_tablets_failed_returns_success_false(tmp_path):
@@ -185,9 +186,11 @@ def test_all_tablets_failed_returns_success_false(tmp_path):
                     with patch('stages.ftp_to_extracted.os.remove'):
                         result = stage.run()
 
-    assert not result.success
+    # Corrupt archives are non-fatal warnings — stage still succeeds (no hard errors)
+    assert result.success
     assert result.rows_written == 0
-    assert len(result.errors) == 1
+    assert len(result.warnings) == 1
+    assert result.warnings[0]['check'] == 'corrupt_archive'
 
 
 def test_download_retried_on_network_error(tmp_path):
