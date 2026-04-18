@@ -29,6 +29,11 @@ def test_promote_copies_all_gold_tables():
     assert any('ibis."_new_d_enrollment"' in s for s in executed_sql)
     assert any('RENAME TO "d_enrollment"' in s for s in executed_sql)
 
+    # Verify the DROP _new_ precedes the CREATE (essential for idempotency)
+    drop_new_idx = next(i for i, s in enumerate(executed_sql) if 'DROP TABLE IF EXISTS ibis."_new_d_participant"' in s)
+    create_new_idx = next(i for i, s in enumerate(executed_sql) if 'CREATE TABLE ibis."_new_d_participant"' in s)
+    assert drop_new_idx < create_new_idx, "DROP _new_ must come before CREATE _new_"
+
 
 def test_promote_rejects_invalid_table_name():
     """Table names containing characters outside [a-z0-9_] must raise ValueError."""
