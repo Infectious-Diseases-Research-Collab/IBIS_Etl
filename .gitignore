@@ -23,6 +23,7 @@ secrets/
 Downloads/
 Extracted/
 Output/
+data/sms_messages/
 
 # Logs
 *.log
