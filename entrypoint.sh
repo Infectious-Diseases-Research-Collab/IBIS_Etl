@@ -40,13 +40,13 @@ fi
 
 cat > /etc/cron.d/ibis <<EOF
 PATH=/usr/local/bin:/usr/bin:/bin
-${PIPELINE_CRON} root cd /app && python ibis.py -a >> /var/log/ibis_pipeline.log 2>&1
-${STORE_CRON} root cd /app && python ibis.py -p store_ibis >> /var/log/ibis_store.log 2>&1
+${PIPELINE_CRON} root cd /app && python ibis.py -a >> /var/log/ibis/pipeline.log 2>&1
+${STORE_CRON} root cd /app && python ibis.py -p store_ibis >> /var/log/ibis/store.log 2>&1
 
 EOF
 
 chmod 0644 /etc/cron.d/ibis
 mkdir -p /var/log/ibis
-touch /var/log/ibis_pipeline.log /var/log/ibis_store.log
+touch /var/log/ibis/pipeline.log /var/log/ibis/store.log
 
 exec "$@"
