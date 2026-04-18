@@ -9,7 +9,7 @@ A containerised data pipeline that downloads field tablet data from an SFTP serv
 The pipeline follows a **medallion architecture** across five PostgreSQL schemas, executed as seven sequential stages:
 
 ```
-SFTP server → Downloads/ → Extracted/  →  bronze_ibis  →  silver_ibis  →  gold_ibis  →  ibis  →  store_ibis
+SFTP server → Downloads/ → Extracted/  →  bronze_ibis  →  silver_ibis  →  gold_ibis  →    →  store_ibis
               (.7z files)  (MDB files)     (ingested)      (deduplicated)  (transformed)  (prod)  (snapshots)
 ```
 
