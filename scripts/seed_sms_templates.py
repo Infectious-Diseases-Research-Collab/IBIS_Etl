@@ -39,7 +39,7 @@ def load_templates_from_excel(messages_dir: str) -> list[dict]:
             for week, message in [(8, row[1]), (11, row[2])]:
                 if not message:
                     continue
-                message = str(message).strip()
+                message = re.sub(r'[ \t]+', ' ', str(message)).strip()
                 templates.append({
                     'arm': arm.strip(),
                     'language': language,
