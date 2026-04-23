@@ -4,6 +4,7 @@ RUN apt-get update && apt-get install -y \
     mdbtools \
     cron \
     p7zip-full \
+    procps \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app

@@ -200,6 +200,7 @@ class SmsProcessor:
                   AND sms_schedule_8weeks IS NOT NULL
                   AND LEFT(sms_schedule_8weeks, 2) != '00'
                   AND mobile_number IS NOT NULL
+                  AND arm_text NOT IN ('Control (SOC)', 'Incentive')
                 ON CONFLICT (subjid, week) DO NOTHING
             """), {"countrycode": self._countrycode})
             r11 = conn.execute(text("""
@@ -221,6 +222,7 @@ class SmsProcessor:
                   AND sms_schedule_11weeks IS NOT NULL
                   AND LEFT(sms_schedule_11weeks, 2) != '00'
                   AND mobile_number IS NOT NULL
+                  AND arm_text NOT IN ('Control (SOC)', 'Incentive')
                 ON CONFLICT (subjid, week) DO NOTHING
             """), {"countrycode": self._countrycode})
             conn.execute(text("""

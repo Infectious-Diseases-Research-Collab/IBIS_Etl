@@ -926,7 +926,7 @@ class DataValidator:
             )
         else:
             enrolled = pd.Series(False, index=df.index)
-        too_short = both_valid & (delta_minutes >= 0) & (delta_minutes < 3) & enrolled
+        too_short = both_valid & (delta_minutes >= 0) & (delta_minutes < 8) & enrolled
         if too_short.any():
             examples = [f"{m:.1f} min" for m in delta_minutes[too_short].head(5)]
             issues.append(dict(
@@ -936,14 +936,14 @@ class DataValidator:
                 record_count=int(too_short.sum()),
                 detail=(
                     f"{too_short.sum()} record(s) have an interview duration "
-                    f"under 3 minutes — form may not have been completed properly. "
+                    f"under 8 minutes — form may not have been completed properly. "
                     f"Examples: {examples}"
                 ),
                 affected_subjids=self._subjids_for_mask(df, too_short),
                 affected_tablets=self._tablets_for_mask(df, too_short),
             ))
 
-        too_long = both_valid & (delta_minutes > 240)
+        too_long = both_valid & (delta_minutes > 30)
         if too_long.any():
             examples = [f"{m:.1f} min" for m in delta_minutes[too_long].head(5)]
             issues.append(dict(
@@ -953,7 +953,7 @@ class DataValidator:
                 record_count=int(too_long.sum()),
                 detail=(
                     f"{too_long.sum()} record(s) have an interview duration "
-                    f"over 240 minutes — tablet may have been left open. "
+                    f"over 30 minutes — tablet may have been left open. "
                     f"Examples: {examples}"
                 ),
                 affected_subjids=self._subjids_for_mask(df, too_long),
