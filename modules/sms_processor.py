@@ -121,10 +121,11 @@ class BlastaClient:
                     continue
                 resp.raise_for_status()
                 body = resp.json()
-                # Extract msg_id from Detail[0] if present
-                detail = body.get('Detail', [])
-                if detail:
-                    body['msg_id'] = detail[0].get('msg_id')
+                if not body.get('msg_id'):
+                    logger.warning(
+                        "No msg_id in send response for %s — message may not be trackable",
+                        phone_number,
+                    )
                 return body
             except requests.RequestException as exc:
                 if attempt < self._max_retries - 1:
@@ -138,6 +139,33 @@ class BlastaClient:
                     raise
         raise requests.RequestException(f"All {self._max_retries} attempts failed for {phone_number}")
 
+    def check_dlr(self, msg_id: str) -> str:
+        """
+        Poll delivery status for a sent message.
+        Returns status string ('DELIVERED', 'PENDING', 'FAILED', 'NOT_FOUND').
+        Raises requests.RequestException on network or server error.
+        """
+        if self._token is None:
+            self._token = self._get_token()
+
+        for attempt in range(2):  # one retry for token refresh
+            resp = requests.post(
+                f"{BLASTA_BASE_URL}/dlr/",
+                headers={"authToken": self._token},
+                json={"msg_id": str(msg_id)},
+                timeout=30,
+            )
+            if resp.status_code == 401:
+                logger.info("Token expired during DLR check, refreshing...")
+                self._token = self._get_token()
+                continue
+            if resp.status_code == 404:
+                return 'NOT_FOUND'
+            resp.raise_for_status()
+            return resp.json()['status']
+
+        raise requests.RequestException(f"DLR check failed for msg_id={msg_id} after token refresh")
+
 
 # ---------------------------------------------------------------------------
 # Result type
@@ -149,6 +177,14 @@ class SendResult:
     failed: int = 0
     skipped: int = 0
     failures: list[dict] = field(default_factory=list)
+
+
+@dataclass
+class DlrResult:
+    checked: int = 0
+    updated: int = 0
+    pending: int = 0
+    errors: list[dict] = field(default_factory=list)
 
 
 # ---------------------------------------------------------------------------
@@ -370,6 +406,91 @@ class SmsProcessor:
         return result
 
     # ------------------------------------------------------------------
+    # Phase 4: poll DLR for unconfirmed sent messages
+    # ------------------------------------------------------------------
+
+    _TERMINAL_STATUSES = frozenset({'DELIVERED', 'FAILED', 'NOT_FOUND'})
+
+    def fetch_delivery_statuses(self) -> DlrResult:
+        """
+        Poll Blasta /dlr/ for every sent log row that has a provider_message_id
+        but no delivery_status yet. Terminal statuses are written back; PENDING
+        rows are left as NULL to be re-checked on the next run.
+        """
+        with self._engine.connect() as conn:
+            rows = conn.execute(text("""
+                SELECT id, queue_id, subjid, provider_message_id
+                FROM sms.log
+                WHERE provider_message_id IS NOT NULL
+                  AND delivery_status IS NULL
+                  AND status = 'sent'
+            """)).fetchall()
+
+        result = DlrResult()
+
+        for row in rows:
+            row_dict = row._asdict()
+            result.checked += 1
+            try:
+                status = self._get_client().check_dlr(row_dict['provider_message_id'])
+            except Exception as exc:
+                logger.warning(
+                    "DLR check failed for log_id=%s msg_id=%s: %s",
+                    row_dict['id'], row_dict['provider_message_id'], exc,
+                )
+                result.errors.append({
+                    'log_id': row_dict['id'],
+                    'subjid': row_dict['subjid'],
+                    'provider_message_id': row_dict['provider_message_id'],
+                    'error': str(exc),
+                })
+                continue
+
+            if status in self._TERMINAL_STATUSES:
+                with self._engine.begin() as conn:
+                    conn.execute(text("""
+                        UPDATE sms.log
+                        SET delivery_status = :status
+                        WHERE id = :id
+                    """), {"status": status, "id": row_dict['id']})
+                result.updated += 1
+                logger.info(
+                    "DLR updated log_id=%s subjid=%s status=%s",
+                    row_dict['id'], row_dict['subjid'], status,
+                )
+            else:
+                result.pending += 1
+                logger.debug(
+                    "DLR pending for log_id=%s subjid=%s status=%s — will retry",
+                    row_dict['id'], row_dict['subjid'], status,
+                )
+
+        return result
+
+    def get_flagged_messages(self) -> list[dict]:
+        """
+        Return messages that failed to reach Blasta (no provider_message_id,
+        queue status still 'failed'). These need manual resending by the data manager.
+        """
+        with self._engine.connect() as conn:
+            rows = conn.execute(text("""
+                SELECT
+                    l.subjid,
+                    b.health_facility_ug,
+                    l.week,
+                    MAX(l.error_message) AS last_error
+                FROM sms.log l
+                JOIN sms.queue     q ON q.id      = l.queue_id
+                JOIN ibis.baseline b ON b.subjid  = l.subjid
+                WHERE q.status = 'failed'
+                  AND l.provider_message_id IS NULL
+                  AND b.countrycode = :countrycode
+                GROUP BY l.subjid, b.health_facility_ug, l.week
+                ORDER BY b.health_facility_ug, l.subjid
+            """), {"countrycode": self._countrycode}).fetchall()
+        return [row._asdict() for row in rows]
+
+    # ------------------------------------------------------------------
     # Main entry point
     # ------------------------------------------------------------------
 
@@ -382,22 +503,55 @@ class SmsProcessor:
     # Weekly report data
     # ------------------------------------------------------------------
 
-    def get_weekly_report_data(self) -> list[dict]:
-        """Return SMS activity for the past 7 days grouped by facility and week."""
+    _WEEKLY_REPORT_SQL = """
+        WITH reached AS (
+            SELECT DISTINCT ON (l.queue_id)
+                b.health_facility_ug,
+                l.week,
+                l.delivery_status
+            FROM sms.log l
+            JOIN sms.queue     q ON q.id      = l.queue_id
+            JOIN ibis.baseline b ON b.subjid  = l.subjid
+            WHERE l.provider_message_id IS NOT NULL
+              AND l.status = 'sent'
+              AND b.countrycode = :countrycode
+              {date_filter}
+            ORDER BY l.queue_id, l.sent_at DESC
+        )
+        SELECT
+            health_facility_ug,
+            week,
+            COUNT(*)                                                           AS submitted,
+            COUNT(*) FILTER (WHERE delivery_status = 'DELIVERED')             AS delivered,
+            COUNT(*) FILTER (WHERE delivery_status IN ('FAILED', 'NOT_FOUND')) AS undelivered,
+            COUNT(*) FILTER (WHERE delivery_status IS NULL)                    AS pending
+        FROM reached
+        GROUP BY health_facility_ug, week
+        ORDER BY health_facility_ug, week
+    """
+
+    def get_weekly_report_data(self, week_start, week_end) -> list[dict]:
+        """
+        Return SMS stats for the study week [week_start, week_end).
+        Only counts messages that reached Blasta (have provider_message_id),
+        grouped by unique queue_id to avoid double-counting retried messages.
+        """
+        sql = self._WEEKLY_REPORT_SQL.format(
+            date_filter="AND l.sent_at >= :week_start AND l.sent_at < :week_end"
+        )
         with self._engine.connect() as conn:
-            rows = conn.execute(text("""
-                SELECT
-                    b.health_facility_ug,
-                    l.week,
-                    COUNT(*) FILTER (WHERE l.status = 'sent')   AS sent,
-                    COUNT(*) FILTER (WHERE l.status = 'failed') AS failed,
-                    COUNT(*) FILTER (WHERE q.opted_out = TRUE)  AS opted_out
-                FROM sms.log l
-                JOIN sms.queue    q ON q.id      = l.queue_id
-                JOIN ibis.baseline b ON b.subjid = l.subjid
-                WHERE l.created_at >= NOW() - INTERVAL '7 days'
-                  AND b.countrycode = :countrycode
-                GROUP BY b.health_facility_ug, l.week
-                ORDER BY b.health_facility_ug, l.week
-            """), {"countrycode": self._countrycode}).fetchall()
+            rows = conn.execute(text(sql), {
+                "countrycode": self._countrycode,
+                "week_start": week_start,
+                "week_end": week_end,
+            }).fetchall()
+        return [row._asdict() for row in rows]
+
+    def get_cumulative_report_data(self) -> list[dict]:
+        """Return all-time SMS stats, same structure as get_weekly_report_data."""
+        sql = self._WEEKLY_REPORT_SQL.format(date_filter="")
+        with self._engine.connect() as conn:
+            rows = conn.execute(text(sql), {
+                "countrycode": self._countrycode,
+            }).fetchall()
         return [row._asdict() for row in rows]

@@ -283,22 +283,27 @@ def test_build_sms_summary_returns_none_when_no_metadata():
 # _build_weekly_sms_report
 # ---------------------------------------------------------------------------
 
-def test_build_weekly_sms_report_includes_facility_and_totals():
+def test_build_weekly_sms_report_includes_sites_and_week_ending():
     from modules.notifier import _build_weekly_sms_report
 
-    rows = [
-        {'health_facility_ug': 'Kampala HC', 'week': 8,  'sent': 5, 'failed': 1, 'opted_out': 0},
-        {'health_facility_ug': 'Kampala HC', 'week': 11, 'sent': 3, 'failed': 0, 'opted_out': 0},
-        {'health_facility_ug': 'Wakiso HC',  'week': 8,  'sent': 4, 'failed': 0, 'opted_out': 1},
+    weekly_rows = [
+        {'health_facility_ug': '11', 'week': 8, 'submitted': 5, 'delivered': 4, 'undelivered': 1, 'pending': 0},
+        {'health_facility_ug': '14', 'week': 8, 'submitted': 3, 'delivered': 3, 'undelivered': 0, 'pending': 0},
     ]
-    report = _build_weekly_sms_report(rows, '17 Apr 2026')
+    cumulative_rows = [
+        {'health_facility_ug': '11', 'week': 8, 'submitted': 20, 'delivered': 18, 'undelivered': 2, 'pending': 0},
+    ]
+    report = _build_weekly_sms_report(weekly_rows, cumulative_rows, '17 Apr 2026')
 
-    assert 'Kampala HC' in report
-    assert 'Wakiso HC' in report
-    assert 'Total' in report
     assert '17 Apr 2026' in report
-    # verify totals are computed correctly: sent=12, failed=1, opted_out=1
-    lines = [l for l in report.splitlines() if 'Total' in l]
-    assert len(lines) == 1
-    assert '12' in lines[0]
-    assert '1' in lines[0]
+    assert 'This week' in report
+    assert 'Cumulative' in report
+    assert 'Bushenyi HCIV' in report
+    assert 'Ruhoko HCIV' in report
+    assert 'Total' in report
+
+
+def test_build_weekly_sms_table_no_activity():
+    from modules.notifier import _build_weekly_sms_table
+    result = _build_weekly_sms_table([], 'This week')
+    assert 'No activity' in result

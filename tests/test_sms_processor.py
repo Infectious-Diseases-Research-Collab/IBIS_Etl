@@ -199,6 +199,25 @@ def test_blasta_client_sends_successfully():
     assert mock_post.call_count == 2
 
 
+def test_blasta_client_send_logs_warning_when_no_msg_id(caplog):
+    """When API returns empty msg_id, send still succeeds but logs a warning."""
+    import logging
+    from modules.sms_processor import BlastaClient
+
+    with patch('modules.sms_processor.requests.post') as mock_post:
+        mock_post.side_effect = [
+            MagicMock(status_code=200, json=lambda: {'access_token': 'tok123'}),
+            MagicMock(status_code=200, raise_for_status=MagicMock(),
+                      json=lambda: {'status_code': '201', 'msg_id': ''}),
+        ]
+        client = BlastaClient('user', 'pass', max_retries=3)
+        with caplog.at_level(logging.WARNING):
+            result = client.send('0700000001', 'Hello')
+
+    assert result.get('msg_id') in (None, '')
+    assert 'msg_id' in caplog.text.lower() or 'provider' in caplog.text.lower()
+
+
 def test_blasta_client_refreshes_token_on_401():
     from modules.sms_processor import BlastaClient
 
@@ -400,3 +419,239 @@ def test_send_sms_stage_returns_failure_on_failed_sends():
     assert result.rows_written == 3
     assert len(result.errors) == 2
     assert 'subjid=X1' in result.errors[0]
+
+
+# ---------------------------------------------------------------------------
+# BlastaClient.check_dlr
+# ---------------------------------------------------------------------------
+
+def test_check_dlr_returns_status_on_success():
+    from modules.sms_processor import BlastaClient
+
+    with patch('modules.sms_processor.requests.post') as mock_post:
+        token_resp = MagicMock(status_code=200, json=lambda: {'access_token': 'tok'})
+        token_resp.raise_for_status = MagicMock()
+        dlr_resp = MagicMock(status_code=200, json=lambda: {
+            'msg_id': '12345', 'status': 'DELIVERED',
+            'submitted_at': '2026-04-23 09:00:00', 'status_code': 200,
+        })
+        dlr_resp.raise_for_status = MagicMock()
+        mock_post.side_effect = [token_resp, dlr_resp]
+
+        client = BlastaClient('user', 'pass')
+        status = client.check_dlr('12345')
+
+    assert status == 'DELIVERED'
+
+
+def test_check_dlr_returns_not_found_on_404():
+    from modules.sms_processor import BlastaClient
+
+    with patch('modules.sms_processor.requests.post') as mock_post:
+        token_resp = MagicMock(status_code=200, json=lambda: {'access_token': 'tok'})
+        token_resp.raise_for_status = MagicMock()
+        not_found = MagicMock(status_code=404)
+        not_found.raise_for_status = MagicMock()
+        mock_post.side_effect = [token_resp, not_found]
+
+        client = BlastaClient('user', 'pass')
+        status = client.check_dlr('99999')
+
+    assert status == 'NOT_FOUND'
+
+
+def test_check_dlr_refreshes_token_on_401():
+    from modules.sms_processor import BlastaClient
+
+    with patch('modules.sms_processor.requests.post') as mock_post:
+        token_resp = MagicMock(status_code=200, json=lambda: {'access_token': 'tok'})
+        token_resp.raise_for_status = MagicMock()
+        unauth = MagicMock(status_code=401)
+        unauth.raise_for_status = MagicMock()
+        success = MagicMock(status_code=200, json=lambda: {'status': 'PENDING', 'status_code': 200})
+        success.raise_for_status = MagicMock()
+        mock_post.side_effect = [token_resp, unauth, token_resp, success]
+
+        client = BlastaClient('user', 'pass')
+        status = client.check_dlr('12345')
+
+    assert status == 'PENDING'
+
+
+def test_check_dlr_raises_on_5xx():
+    import requests as req_lib
+    from modules.sms_processor import BlastaClient
+
+    with patch('modules.sms_processor.requests.post') as mock_post:
+        token_resp = MagicMock(status_code=200, json=lambda: {'access_token': 'tok'})
+        token_resp.raise_for_status = MagicMock()
+        server_err = MagicMock(status_code=500)
+        server_err.raise_for_status = MagicMock(side_effect=req_lib.HTTPError('500'))
+        mock_post.side_effect = [token_resp, server_err]
+
+        client = BlastaClient('user', 'pass')
+        with pytest.raises(req_lib.RequestException):
+            client.check_dlr('12345')
+
+
+# ---------------------------------------------------------------------------
+# SmsProcessor.fetch_delivery_statuses
+# ---------------------------------------------------------------------------
+
+def _make_log_row(log_id, queue_id, subjid, provider_message_id):
+    row = MagicMock()
+    row._asdict.return_value = {
+        'id': log_id,
+        'queue_id': queue_id,
+        'subjid': subjid,
+        'provider_message_id': provider_message_id,
+    }
+    return row
+
+
+def test_fetch_delivery_statuses_updates_terminal_status():
+    from modules.sms_processor import SmsProcessor
+
+    engine, conn = make_engine_mock(
+        fetchall_return=[_make_log_row(1, 10, 'IBIS001', '274001')]
+    )
+    processor = SmsProcessor(config=make_config(), engine=engine)
+
+    with patch.object(processor, '_get_client') as mock_get_client:
+        mock_get_client.return_value.check_dlr.return_value = 'DELIVERED'
+        result = processor.fetch_delivery_statuses()
+
+    assert result.checked == 1
+    assert result.updated == 1
+    assert result.pending == 0
+    assert result.errors == []
+
+
+def test_fetch_delivery_statuses_leaves_pending_as_null():
+    from modules.sms_processor import SmsProcessor
+
+    engine, conn = make_engine_mock(
+        fetchall_return=[_make_log_row(2, 20, 'IBIS002', '274002')]
+    )
+    processor = SmsProcessor(config=make_config(), engine=engine)
+
+    with patch.object(processor, '_get_client') as mock_get_client:
+        mock_get_client.return_value.check_dlr.return_value = 'PENDING'
+        result = processor.fetch_delivery_statuses()
+
+    assert result.checked == 1
+    assert result.updated == 0
+    assert result.pending == 1
+
+
+def test_fetch_delivery_statuses_continues_on_single_error():
+    from modules.sms_processor import SmsProcessor
+    import requests as req_lib
+
+    engine, conn = make_engine_mock(fetchall_return=[
+        _make_log_row(3, 30, 'IBIS003', '274003'),
+        _make_log_row(4, 40, 'IBIS004', '274004'),
+    ])
+    processor = SmsProcessor(config=make_config(), engine=engine)
+
+    with patch.object(processor, '_get_client') as mock_get_client:
+        mock_get_client.return_value.check_dlr.side_effect = [
+            req_lib.RequestException('timeout'),
+            'DELIVERED',
+        ]
+        result = processor.fetch_delivery_statuses()
+
+    assert result.checked == 2
+    assert result.updated == 1
+    assert len(result.errors) == 1
+
+
+def test_fetch_delivery_statuses_no_rows_returns_zero():
+    from modules.sms_processor import SmsProcessor
+
+    engine, conn = make_engine_mock(fetchall_return=[])
+    processor = SmsProcessor(config=make_config(), engine=engine)
+    result = processor.fetch_delivery_statuses()
+
+    assert result.checked == 0
+    assert result.updated == 0
+
+
+# ---------------------------------------------------------------------------
+# SmsProcessor.get_flagged_messages
+# ---------------------------------------------------------------------------
+
+def test_get_flagged_messages_returns_failed_no_provider_id():
+    from modules.sms_processor import SmsProcessor
+
+    row = MagicMock()
+    row._asdict.return_value = {
+        'subjid': 'IBIS001',
+        'health_facility_ug': '14',
+        'week': 8,
+        'last_error': 'Read timed out',
+    }
+    engine, conn = make_engine_mock(fetchall_return=[row])
+    processor = SmsProcessor(config=make_config(), engine=engine)
+    flagged = processor.get_flagged_messages()
+
+    assert len(flagged) == 1
+    assert flagged[0]['subjid'] == 'IBIS001'
+    assert flagged[0]['week'] == 8
+
+
+def test_get_flagged_messages_empty_when_none():
+    from modules.sms_processor import SmsProcessor
+
+    engine, conn = make_engine_mock(fetchall_return=[])
+    processor = SmsProcessor(config=make_config(), engine=engine)
+    assert processor.get_flagged_messages() == []
+
+
+# ---------------------------------------------------------------------------
+# SmsProcessor.get_weekly_report_data / get_cumulative_report_data
+# ---------------------------------------------------------------------------
+
+def test_get_weekly_report_data_returns_list_of_dicts():
+    from modules.sms_processor import SmsProcessor
+    from datetime import date
+
+    row = MagicMock()
+    row._asdict.return_value = {
+        'health_facility_ug': '13',
+        'week': 8,
+        'submitted': 5,
+        'delivered': 4,
+        'undelivered': 0,
+        'pending': 1,
+    }
+    engine, conn = make_engine_mock(fetchall_return=[row])
+    processor = SmsProcessor(config=make_config(), engine=engine)
+    rows = processor.get_weekly_report_data(
+        week_start=date(2026, 4, 17),
+        week_end=date(2026, 4, 24),
+    )
+
+    assert len(rows) == 1
+    assert rows[0]['health_facility_ug'] == '13'
+    assert rows[0]['submitted'] == 5
+
+
+def test_get_cumulative_report_data_returns_list_of_dicts():
+    from modules.sms_processor import SmsProcessor
+
+    row = MagicMock()
+    row._asdict.return_value = {
+        'health_facility_ug': '14',
+        'week': 8,
+        'submitted': 20,
+        'delivered': 19,
+        'undelivered': 1,
+        'pending': 0,
+    }
+    engine, conn = make_engine_mock(fetchall_return=[row])
+    processor = SmsProcessor(config=make_config(), engine=engine)
+    rows = processor.get_cumulative_report_data()
+
+    assert rows[0]['submitted'] == 20
+    assert rows[0]['delivered'] == 19

@@ -16,6 +16,14 @@ from stages.base import StageResult
 
 logger = logging.getLogger(__name__)
 
+_UG_SITE_NAMES: dict[str, str] = {
+    '11': 'Bushenyi HCIV',
+    '12': 'Ishaka Adv. Hosp',
+    '13': 'Ishongororo HCIV',
+    '14': 'Ruhoko HCIV',
+    '99': 'Other',
+}
+
 
 def _load_smtp_password(ini_path: str, key_path: str) -> str:
     """
@@ -258,39 +266,83 @@ def _build_sms_summary(results: dict[str, 'StageResult']) -> str | None:
     return '\n'.join(lines)
 
 
-def _build_weekly_sms_report(rows: list[dict], week_ending: str) -> str:
-    """Build plain-text weekly SMS report table."""
-    sep   = '─' * 65
-    lines = [f'IBIS SMS Weekly Report — week ending {week_ending}', sep]
-    lines.append(f'{"Health Facility":<32} {"Wk":>3} {"Sent":>6} {"Failed":>7} {"Opt-out":>8}')
-    lines.append(sep)
+def _build_weekly_sms_table(rows: list[dict], title: str) -> str:
+    """
+    Build a transposed SMS stats table: sites as columns, weeks+metrics as rows.
+    rows: list of dicts with keys health_facility_ug, week, submitted, delivered,
+          undelivered, pending.
+    """
+    if not rows:
+        return f'{title}\n  No activity.\n'
 
-    total_sent = total_failed = total_opted = 0
-    for row in rows:
-        facility = (row['health_facility_ug'] or 'Unknown')[:31]
-        lines.append(
-            f'{facility:<32} {row["week"]:>3} {row["sent"]:>6}'
-            f' {row["failed"]:>7} {row["opted_out"]:>8}'
-        )
-        total_sent   += row['sent']
-        total_failed += row['failed']
-        total_opted  += row['opted_out']
+    # Determine which site codes appear in data, in canonical order
+    all_sites = [
+        code for code in _UG_SITE_NAMES
+        if any(str(r['health_facility_ug']) == code for r in rows)
+    ]
+    all_weeks = sorted({r['week'] for r in rows})
 
-    lines.append(sep)
-    # Total row: facility+week columns combined (35 chars) to match data row width
-    lines.append(f'{"Total":<35} {total_sent:>6} {total_failed:>7} {total_opted:>8}')
-    lines.append(sep)
+    # Build lookup: (site_code, week) -> row dict
+    lookup: dict[tuple, dict] = {}
+    for r in rows:
+        lookup[(str(r['health_facility_ug']), r['week'])] = r
+
+    col_w = 14   # width of each site data column
+    label_w = 16  # width of row label column
+
+    sep = '─' * (label_w + col_w * len(all_sites) + col_w)
+
+    # Header row
+    header = f"{'':>{label_w}}"
+    for code in all_sites:
+        name = _UG_SITE_NAMES.get(code, code)
+        header += f'{name:>{col_w}}'
+    header += f'{"Total":>{col_w}}'
+
+    lines = [title, sep, header, sep]
+
+    metrics = [
+        ('submitted',   'Submitted'),
+        ('delivered',   'Delivered'),
+        ('undelivered', 'Undelivered'),
+        ('pending',     'Pending'),
+    ]
+
+    for week in all_weeks:
+        first = True
+        for key, label in metrics:
+            site_vals = [lookup.get((code, week), {}).get(key, 0) for code in all_sites]
+            total = sum(site_vals)
+            week_label = f'Week {week}' if first else ''
+            row_label = f'{week_label:<8}  {label}'
+            first = False
+            data_cols = ''.join(f'{v:>{col_w}}' for v in site_vals)
+            lines.append(f'{row_label:<{label_w}}{data_cols}{total:>{col_w}}')
+        lines.append(sep)
+
     return '\n'.join(lines)
+
+
+def _build_weekly_sms_report(weekly_rows: list[dict], cumulative_rows: list[dict], week_ending: str) -> str:
+    """Build full weekly SMS report: this-week table + cumulative table."""
+    parts = [
+        f'IBIS SMS Weekly Report — week ending {week_ending}',
+        '',
+        _build_weekly_sms_table(weekly_rows, 'This week'),
+        '',
+        _build_weekly_sms_table(cumulative_rows, 'Cumulative (all time)'),
+    ]
+    return '\n'.join(parts)
 
 
 def send_sms_weekly_report(engine, config) -> None:
     """Send weekly SMS activity report to Uganda field recipients."""
+    from datetime import date, timedelta
     email_cfg = config.get('email')
     if not email_cfg:
         return
 
     field_recipients_cfg = email_cfg.get('field_recipients', {})
-    # Accept both 'uganda' and 'Uganda' as keys
     uganda_recipients = next(
         (v for k, v in field_recipients_cfg.items() if k.lower() == 'uganda'),
         [],
@@ -299,20 +351,92 @@ def send_sms_weekly_report(engine, config) -> None:
         logger.warning("No Uganda field recipients configured — weekly SMS report not sent.")
         return
 
-    from modules.sms_processor import SmsProcessor  # late import to avoid circular dependency
+    # Thursday-to-Thursday window: last Thursday 00:00 to this Thursday 00:00
+    today = date.today()
+    days_since_thursday = (today.weekday() - 3) % 7
+    this_thursday = today - timedelta(days=days_since_thursday)
+    week_start = this_thursday - timedelta(days=7)
+    week_end = this_thursday
+
+    from modules.sms_processor import SmsProcessor
     processor = SmsProcessor(config=config, engine=engine)
-    rows = processor.get_weekly_report_data()
-    if not rows:
-        logger.info("No SMS activity in the past 7 days — weekly report not sent.")
+    weekly_rows = processor.get_weekly_report_data(week_start=week_start, week_end=week_end)
+    cumulative_rows = processor.get_cumulative_report_data()
+
+    if not weekly_rows and not cumulative_rows:
+        logger.info("No SMS activity — weekly report not sent.")
         return
 
-    today = date.today().strftime('%d %b %Y')
-    subject = f'IBIS SMS Weekly Report \u2014 week ending {today}'
-    plain   = _build_weekly_sms_report(rows, today)
-    html    = f'<pre style="font-family:monospace;font-size:13px">{_html.escape(plain)}</pre>'
+    week_ending_str = this_thursday.strftime('%d %b %Y')
+    subject = f'IBIS SMS Weekly Report \u2014 week ending {week_ending_str}'
+    plain = _build_weekly_sms_report(weekly_rows, cumulative_rows, week_ending_str)
+    html = f'<pre style="font-family:monospace;font-size:13px">{_html.escape(plain)}</pre>'
 
     try:
         _send(email_cfg, uganda_recipients, subject, plain, html)
         logger.info('Weekly SMS report sent to %s.', uganda_recipients)
     except Exception as exc:
         logger.error('Weekly SMS report email failed: %s', exc)
+
+
+def send_sms_flagged_alert(flagged: list[dict], config, engine) -> None:
+    """
+    Send daily alert to data manager listing messages that never reached Blasta.
+    Only called when flagged is non-empty.
+    """
+    from datetime import date
+    email_cfg = config.get('email')
+    if not email_cfg:
+        return
+
+    dm_recipients = email_cfg.get('sms_dm_recipients', [])
+    if not dm_recipients:
+        logger.warning("No sms_dm_recipients configured — flagged alert not sent.")
+        return
+
+    today_str = date.today().strftime('%d %b %Y')
+    subject = f'IBIS SMS \u2014 Action Required: {today_str}'
+
+    sep = '─' * 85
+    lines = [
+        f'IBIS SMS — Action Required: {today_str}',
+        sep,
+        'The following messages failed to reach Blasta and require manual resending.',
+        '',
+        f'{"Participant":<20} {"Site":<35} {"Week":>4}  Last Error',
+        sep,
+    ]
+
+    for msg in flagged:
+        site_name = _UG_SITE_NAMES.get(
+            str(msg.get('health_facility_ug', '')),
+            str(msg.get('health_facility_ug', 'Unknown')),
+        )
+        error = (msg.get('last_error') or 'unknown')[:40]
+        lines.append(
+            f"{msg['subjid']:<20} {site_name:<35} {msg['week']:>4}  {error}"
+        )
+
+    lines.append(sep)
+
+    # Build resend SQL grouped by week
+    by_week: dict[int, list[str]] = {}
+    for msg in flagged:
+        by_week.setdefault(msg['week'], []).append(msg['subjid'])
+
+    lines.append('To resend, run:')
+    for week, subjids in sorted(by_week.items()):
+        id_list = ', '.join(f"'{s}'" for s in subjids)
+        lines.append(f"  UPDATE sms.queue SET status = 'pending'")
+        lines.append(f"  WHERE subjid IN ({id_list}) AND week = {week};")
+
+    lines.append(sep)
+
+    plain = '\n'.join(lines)
+    html = f'<pre style="font-family:monospace;font-size:13px">{_html.escape(plain)}</pre>'
+
+    try:
+        _send(email_cfg, dm_recipients, subject, plain, html)
+        logger.info('Flagged SMS alert sent to %s (%d messages).', dm_recipients, len(flagged))
+    except Exception as exc:
+        logger.error('Flagged SMS alert email failed: %s', exc)

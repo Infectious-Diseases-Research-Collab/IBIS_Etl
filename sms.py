@@ -34,11 +34,13 @@ def init_db(engine) -> None:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description='IBIS SMS standalone runner')
-    parser.add_argument('--sync',          action='store_true', help='Sync queue only, no sending')
-    parser.add_argument('--dry-run',       action='store_true', help='Log what would be sent, no actual send')
-    parser.add_argument('--weekly-report', action='store_true', help='Send weekly facility report email')
-    parser.add_argument('--init-db',       action='store_true', help='Create SMS tables (run once at setup)')
-    parser.add_argument('-v', '--verbose', action='store_true')
+    parser.add_argument('--sync',            action='store_true', help='Sync queue only, no sending')
+    parser.add_argument('--dry-run',         action='store_true', help='Log what would be sent, no actual send')
+    parser.add_argument('--weekly-report',   action='store_true', help='Send weekly facility report email')
+    parser.add_argument('--init-db',         action='store_true', help='Create SMS tables (run once at setup)')
+    parser.add_argument('--check-delivery',  action='store_true',
+                        help='Poll Blasta DLR for all unconfirmed sent messages')
+    parser.add_argument('-v', '--verbose',   action='store_true')
     args = parser.parse_args()
 
     if args.verbose:
@@ -50,6 +52,21 @@ def main() -> None:
 
     if args.init_db:
         init_db(engine)
+        return
+
+    if args.check_delivery:
+        from modules.sms_processor import SmsProcessor
+        from modules.notifier import send_sms_flagged_alert
+        processor = SmsProcessor(config=config, engine=engine)
+        dlr = processor.fetch_delivery_statuses()
+        logger.info(
+            'DLR check complete: checked=%d updated=%d pending=%d errors=%d',
+            dlr.checked, dlr.updated, dlr.pending, len(dlr.errors),
+        )
+        flagged = processor.get_flagged_messages()
+        if flagged:
+            send_sms_flagged_alert(flagged, config, engine)
+            logger.info('%d message(s) flagged — alert sent to data manager.', len(flagged))
         return
 
     if args.weekly_report:
