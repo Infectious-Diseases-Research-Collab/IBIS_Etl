@@ -492,3 +492,86 @@ def test_check_dlr_raises_on_5xx():
         client = BlastaClient('user', 'pass')
         with pytest.raises(req_lib.RequestException):
             client.check_dlr('12345')
+
+
+# ---------------------------------------------------------------------------
+# SmsProcessor.fetch_delivery_statuses
+# ---------------------------------------------------------------------------
+
+def _make_log_row(log_id, queue_id, subjid, provider_message_id):
+    row = MagicMock()
+    row._asdict.return_value = {
+        'id': log_id,
+        'queue_id': queue_id,
+        'subjid': subjid,
+        'provider_message_id': provider_message_id,
+    }
+    return row
+
+
+def test_fetch_delivery_statuses_updates_terminal_status():
+    from modules.sms_processor import SmsProcessor
+
+    engine, conn = make_engine_mock(
+        fetchall_return=[_make_log_row(1, 10, 'IBIS001', '274001')]
+    )
+    processor = SmsProcessor(config=make_config(), engine=engine)
+
+    with patch.object(processor, '_get_client') as mock_get_client:
+        mock_get_client.return_value.check_dlr.return_value = 'DELIVERED'
+        result = processor.fetch_delivery_statuses()
+
+    assert result.checked == 1
+    assert result.updated == 1
+    assert result.pending == 0
+    assert result.errors == []
+
+
+def test_fetch_delivery_statuses_leaves_pending_as_null():
+    from modules.sms_processor import SmsProcessor
+
+    engine, conn = make_engine_mock(
+        fetchall_return=[_make_log_row(2, 20, 'IBIS002', '274002')]
+    )
+    processor = SmsProcessor(config=make_config(), engine=engine)
+
+    with patch.object(processor, '_get_client') as mock_get_client:
+        mock_get_client.return_value.check_dlr.return_value = 'PENDING'
+        result = processor.fetch_delivery_statuses()
+
+    assert result.checked == 1
+    assert result.updated == 0
+    assert result.pending == 1
+
+
+def test_fetch_delivery_statuses_continues_on_single_error():
+    from modules.sms_processor import SmsProcessor
+    import requests as req_lib
+
+    engine, conn = make_engine_mock(fetchall_return=[
+        _make_log_row(3, 30, 'IBIS003', '274003'),
+        _make_log_row(4, 40, 'IBIS004', '274004'),
+    ])
+    processor = SmsProcessor(config=make_config(), engine=engine)
+
+    with patch.object(processor, '_get_client') as mock_get_client:
+        mock_get_client.return_value.check_dlr.side_effect = [
+            req_lib.RequestException('timeout'),
+            'DELIVERED',
+        ]
+        result = processor.fetch_delivery_statuses()
+
+    assert result.checked == 2
+    assert result.updated == 1
+    assert len(result.errors) == 1
+
+
+def test_fetch_delivery_statuses_no_rows_returns_zero():
+    from modules.sms_processor import SmsProcessor
+
+    engine, conn = make_engine_mock(fetchall_return=[])
+    processor = SmsProcessor(config=make_config(), engine=engine)
+    result = processor.fetch_delivery_statuses()
+
+    assert result.checked == 0
+    assert result.updated == 0

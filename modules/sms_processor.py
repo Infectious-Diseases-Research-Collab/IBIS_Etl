@@ -179,6 +179,14 @@ class SendResult:
     failures: list[dict] = field(default_factory=list)
 
 
+@dataclass
+class DlrResult:
+    checked: int = 0
+    updated: int = 0
+    pending: int = 0
+    errors: list[dict] = field(default_factory=list)
+
+
 # ---------------------------------------------------------------------------
 # SMS Processor
 # ---------------------------------------------------------------------------
@@ -392,6 +400,68 @@ class SmsProcessor:
                 error_message=error_msg,
             )
             self._update_queue_status(row['id'], 'sent' if success else 'failed')
+
+        return result
+
+    # ------------------------------------------------------------------
+    # Phase 4: poll DLR for unconfirmed sent messages
+    # ------------------------------------------------------------------
+
+    _TERMINAL_STATUSES = frozenset({'DELIVERED', 'FAILED', 'NOT_FOUND'})
+
+    def fetch_delivery_statuses(self) -> DlrResult:
+        """
+        Poll Blasta /dlr/ for every sent log row that has a provider_message_id
+        but no delivery_status yet. Terminal statuses are written back; PENDING
+        rows are left as NULL to be re-checked on the next run.
+        """
+        with self._engine.connect() as conn:
+            rows = conn.execute(text("""
+                SELECT id, queue_id, subjid, provider_message_id
+                FROM sms.log
+                WHERE provider_message_id IS NOT NULL
+                  AND delivery_status IS NULL
+                  AND status = 'sent'
+            """)).fetchall()
+
+        result = DlrResult()
+
+        for row in rows:
+            row_dict = row._asdict()
+            result.checked += 1
+            try:
+                status = self._get_client().check_dlr(row_dict['provider_message_id'])
+            except Exception as exc:
+                logger.warning(
+                    "DLR check failed for log_id=%s msg_id=%s: %s",
+                    row_dict['id'], row_dict['provider_message_id'], exc,
+                )
+                result.errors.append({
+                    'log_id': row_dict['id'],
+                    'subjid': row_dict['subjid'],
+                    'provider_message_id': row_dict['provider_message_id'],
+                    'error': str(exc),
+                })
+                continue
+
+            if status in self._TERMINAL_STATUSES:
+                with self._engine.begin() as conn:
+                    conn.execute(text("""
+                        UPDATE sms.log
+                        SET delivery_status = :status
+                        WHERE id = :id
+                    """), {"status": status, "id": row_dict['id']})
+                result.updated += 1
+                logger.info(
+                    "DLR updated log_id=%s subjid=%s status=%s",
+                    row_dict['id'], row_dict['subjid'], status,
+                )
+            else:
+                result.pending += 1
+                logger.debug(
+                    "DLR pending for log_id=%s subjid=%s status=%s — will retry",
+                    row_dict['id'], row_dict['subjid'], status,
+                )
 
         return result
 
