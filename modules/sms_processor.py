@@ -465,6 +465,29 @@ class SmsProcessor:
 
         return result
 
+    def get_flagged_messages(self) -> list[dict]:
+        """
+        Return messages that failed to reach Blasta (no provider_message_id,
+        queue status still 'failed'). These need manual resending by the data manager.
+        """
+        with self._engine.connect() as conn:
+            rows = conn.execute(text("""
+                SELECT
+                    l.subjid,
+                    b.health_facility_ug,
+                    l.week,
+                    MAX(l.error_message) AS last_error
+                FROM sms.log l
+                JOIN sms.queue     q ON q.id      = l.queue_id
+                JOIN ibis.baseline b ON b.subjid  = l.subjid
+                WHERE q.status = 'failed'
+                  AND l.provider_message_id IS NULL
+                  AND b.countrycode = :countrycode
+                GROUP BY l.subjid, b.health_facility_ug, l.week
+                ORDER BY b.health_facility_ug, l.subjid
+            """), {"countrycode": self._countrycode}).fetchall()
+        return [row._asdict() for row in rows]
+
     # ------------------------------------------------------------------
     # Main entry point
     # ------------------------------------------------------------------

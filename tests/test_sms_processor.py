@@ -575,3 +575,34 @@ def test_fetch_delivery_statuses_no_rows_returns_zero():
 
     assert result.checked == 0
     assert result.updated == 0
+
+
+# ---------------------------------------------------------------------------
+# SmsProcessor.get_flagged_messages
+# ---------------------------------------------------------------------------
+
+def test_get_flagged_messages_returns_failed_no_provider_id():
+    from modules.sms_processor import SmsProcessor
+
+    row = MagicMock()
+    row._asdict.return_value = {
+        'subjid': 'IBIS001',
+        'health_facility_ug': '14',
+        'week': 8,
+        'last_error': 'Read timed out',
+    }
+    engine, conn = make_engine_mock(fetchall_return=[row])
+    processor = SmsProcessor(config=make_config(), engine=engine)
+    flagged = processor.get_flagged_messages()
+
+    assert len(flagged) == 1
+    assert flagged[0]['subjid'] == 'IBIS001'
+    assert flagged[0]['week'] == 8
+
+
+def test_get_flagged_messages_empty_when_none():
+    from modules.sms_processor import SmsProcessor
+
+    engine, conn = make_engine_mock(fetchall_return=[])
+    processor = SmsProcessor(config=make_config(), engine=engine)
+    assert processor.get_flagged_messages() == []
