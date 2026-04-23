@@ -139,6 +139,33 @@ class BlastaClient:
                     raise
         raise requests.RequestException(f"All {self._max_retries} attempts failed for {phone_number}")
 
+    def check_dlr(self, msg_id: str) -> str:
+        """
+        Poll delivery status for a sent message.
+        Returns status string ('DELIVERED', 'PENDING', 'FAILED', 'NOT_FOUND').
+        Raises requests.RequestException on network or server error.
+        """
+        if self._token is None:
+            self._token = self._get_token()
+
+        for attempt in range(2):  # one retry for token refresh
+            resp = requests.post(
+                f"{BLASTA_BASE_URL}/dlr/",
+                headers={"authToken": self._token},
+                json={"msg_id": str(msg_id)},
+                timeout=30,
+            )
+            if resp.status_code == 401:
+                logger.info("Token expired during DLR check, refreshing...")
+                self._token = self._get_token()
+                continue
+            if resp.status_code == 404:
+                return 'NOT_FOUND'
+            resp.raise_for_status()
+            return resp.json()['status']
+
+        raise requests.RequestException(f"DLR check failed for msg_id={msg_id} after token refresh")
+
 
 # ---------------------------------------------------------------------------
 # Result type

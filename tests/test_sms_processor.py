@@ -419,3 +419,76 @@ def test_send_sms_stage_returns_failure_on_failed_sends():
     assert result.rows_written == 3
     assert len(result.errors) == 2
     assert 'subjid=X1' in result.errors[0]
+
+
+# ---------------------------------------------------------------------------
+# BlastaClient.check_dlr
+# ---------------------------------------------------------------------------
+
+def test_check_dlr_returns_status_on_success():
+    from modules.sms_processor import BlastaClient
+
+    with patch('modules.sms_processor.requests.post') as mock_post:
+        token_resp = MagicMock(status_code=200, json=lambda: {'access_token': 'tok'})
+        token_resp.raise_for_status = MagicMock()
+        dlr_resp = MagicMock(status_code=200, json=lambda: {
+            'msg_id': '12345', 'status': 'DELIVERED',
+            'submitted_at': '2026-04-23 09:00:00', 'status_code': 200,
+        })
+        dlr_resp.raise_for_status = MagicMock()
+        mock_post.side_effect = [token_resp, dlr_resp]
+
+        client = BlastaClient('user', 'pass')
+        status = client.check_dlr('12345')
+
+    assert status == 'DELIVERED'
+
+
+def test_check_dlr_returns_not_found_on_404():
+    from modules.sms_processor import BlastaClient
+
+    with patch('modules.sms_processor.requests.post') as mock_post:
+        token_resp = MagicMock(status_code=200, json=lambda: {'access_token': 'tok'})
+        token_resp.raise_for_status = MagicMock()
+        not_found = MagicMock(status_code=404)
+        not_found.raise_for_status = MagicMock()
+        mock_post.side_effect = [token_resp, not_found]
+
+        client = BlastaClient('user', 'pass')
+        status = client.check_dlr('99999')
+
+    assert status == 'NOT_FOUND'
+
+
+def test_check_dlr_refreshes_token_on_401():
+    from modules.sms_processor import BlastaClient
+
+    with patch('modules.sms_processor.requests.post') as mock_post:
+        token_resp = MagicMock(status_code=200, json=lambda: {'access_token': 'tok'})
+        token_resp.raise_for_status = MagicMock()
+        unauth = MagicMock(status_code=401)
+        unauth.raise_for_status = MagicMock()
+        success = MagicMock(status_code=200, json=lambda: {'status': 'PENDING', 'status_code': 200})
+        success.raise_for_status = MagicMock()
+        mock_post.side_effect = [token_resp, unauth, token_resp, success]
+
+        client = BlastaClient('user', 'pass')
+        status = client.check_dlr('12345')
+
+    assert status == 'PENDING'
+
+
+def test_check_dlr_raises_on_5xx():
+    import requests as req_lib
+    from modules.sms_processor import BlastaClient
+
+    with patch('modules.sms_processor.requests.post') as mock_post:
+        token_resp = MagicMock(status_code=200, json=lambda: {'access_token': 'tok'})
+        token_resp.raise_for_status = MagicMock()
+        server_err = MagicMock(status_code=500)
+        server_err.raise_for_status = MagicMock(side_effect=req_lib.HTTPError('500'))
+        mock_post.side_effect = [token_resp, server_err]
+
+        client = BlastaClient('user', 'pass')
+        with pytest.raises(req_lib.RequestException):
+            client.check_dlr('12345')
