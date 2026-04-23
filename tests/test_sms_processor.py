@@ -199,6 +199,25 @@ def test_blasta_client_sends_successfully():
     assert mock_post.call_count == 2
 
 
+def test_blasta_client_send_logs_warning_when_no_msg_id(caplog):
+    """When API returns empty msg_id, send still succeeds but logs a warning."""
+    import logging
+    from modules.sms_processor import BlastaClient
+
+    with patch('modules.sms_processor.requests.post') as mock_post:
+        mock_post.side_effect = [
+            MagicMock(status_code=200, json=lambda: {'access_token': 'tok123'}),
+            MagicMock(status_code=200, raise_for_status=MagicMock(),
+                      json=lambda: {'status_code': '201', 'msg_id': ''}),
+        ]
+        client = BlastaClient('user', 'pass', max_retries=3)
+        with caplog.at_level(logging.WARNING):
+            result = client.send('0700000001', 'Hello')
+
+    assert result.get('msg_id') in (None, '')
+    assert 'msg_id' in caplog.text.lower() or 'provider' in caplog.text.lower()
+
+
 def test_blasta_client_refreshes_token_on_401():
     from modules.sms_processor import BlastaClient
 

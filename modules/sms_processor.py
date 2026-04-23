@@ -121,10 +121,11 @@ class BlastaClient:
                     continue
                 resp.raise_for_status()
                 body = resp.json()
-                # Extract msg_id from Detail[0] if present
-                detail = body.get('Detail', [])
-                if detail:
-                    body['msg_id'] = detail[0].get('msg_id')
+                if not body.get('msg_id'):
+                    logger.warning(
+                        "No msg_id in send response for %s — message may not be trackable",
+                        phone_number,
+                    )
                 return body
             except requests.RequestException as exc:
                 if attempt < self._max_retries - 1:
