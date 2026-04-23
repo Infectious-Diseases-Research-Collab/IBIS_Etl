@@ -287,8 +287,10 @@ def _build_weekly_sms_table(rows: list[dict], title: str) -> str:
     for r in rows:
         lookup[(str(r['health_facility_ug']), r['week'])] = r
 
-    col_w = 14   # width of each site data column
-    label_w = 16  # width of row label column
+    col_w = 17    # width of each site data column (longest name is 16 chars)
+    week_w = 9    # "Week 11 " padded
+    metric_w = 13 # "Undelivered  " padded — longest metric label is 11 chars
+    label_w = week_w + metric_w  # 22
 
     sep = '─' * (label_w + col_w * len(all_sites) + col_w)
 
@@ -314,10 +316,10 @@ def _build_weekly_sms_table(rows: list[dict], title: str) -> str:
             site_vals = [lookup.get((code, week), {}).get(key, 0) for code in all_sites]
             total = sum(site_vals)
             week_label = f'Week {week}' if first else ''
-            row_label = f'{week_label:<8}  {label}'
             first = False
+            row_label = f'{week_label:<{week_w}}{label:<{metric_w}}'
             data_cols = ''.join(f'{v:>{col_w}}' for v in site_vals)
-            lines.append(f'{row_label:<{label_w}}{data_cols}{total:>{col_w}}')
+            lines.append(f'{row_label}{data_cols}{total:>{col_w}}')
         lines.append(sep)
 
     return '\n'.join(lines)
@@ -351,12 +353,12 @@ def send_sms_weekly_report(engine, config) -> None:
         logger.warning("No Uganda field recipients configured — weekly SMS report not sent.")
         return
 
-    # Thursday-to-Thursday window: last Thursday 00:00 to this Thursday 00:00
+    # Thursday-to-Thursday window: last Thursday 00:00 to end of this Thursday
     today = date.today()
     days_since_thursday = (today.weekday() - 3) % 7
     this_thursday = today - timedelta(days=days_since_thursday)
     week_start = this_thursday - timedelta(days=7)
-    week_end = this_thursday
+    week_end = this_thursday + timedelta(days=1)  # exclusive upper bound — includes all of Thursday
 
     from modules.sms_processor import SmsProcessor
     processor = SmsProcessor(config=config, engine=engine)
