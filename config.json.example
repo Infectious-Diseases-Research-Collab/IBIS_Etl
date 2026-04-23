@@ -43,7 +43,8 @@
     "pipeline_cron": "0 2 * * *",
     "store_cron": "0 3 * * 0",
     "sms_cron":               "0 9 * * *",
-    "sms_weekly_report_cron": "0 7 * * 1"
+    "sms_weekly_report_cron": "0 10 * * 4",
+    "dlr_cron":               "0 12 * * *"
   },
   "email": {
     "smtp_host": "smtp.example.com",
@@ -56,6 +57,7 @@
       "country2": ["dm-country2@example.com"]
     },
     "notify_countries": ["country1", "country2"],
+    "sms_dm_recipients": [],
     "keyfiles": {
       "smtp_ini": "secrets/SMTP.ini",
       "smtp_key": "secrets/SMTP.key"
