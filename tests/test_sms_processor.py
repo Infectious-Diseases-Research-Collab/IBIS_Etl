@@ -606,3 +606,52 @@ def test_get_flagged_messages_empty_when_none():
     engine, conn = make_engine_mock(fetchall_return=[])
     processor = SmsProcessor(config=make_config(), engine=engine)
     assert processor.get_flagged_messages() == []
+
+
+# ---------------------------------------------------------------------------
+# SmsProcessor.get_weekly_report_data / get_cumulative_report_data
+# ---------------------------------------------------------------------------
+
+def test_get_weekly_report_data_returns_list_of_dicts():
+    from modules.sms_processor import SmsProcessor
+    from datetime import date
+
+    row = MagicMock()
+    row._asdict.return_value = {
+        'health_facility_ug': '13',
+        'week': 8,
+        'submitted': 5,
+        'delivered': 4,
+        'undelivered': 0,
+        'pending': 1,
+    }
+    engine, conn = make_engine_mock(fetchall_return=[row])
+    processor = SmsProcessor(config=make_config(), engine=engine)
+    rows = processor.get_weekly_report_data(
+        week_start=date(2026, 4, 17),
+        week_end=date(2026, 4, 24),
+    )
+
+    assert len(rows) == 1
+    assert rows[0]['health_facility_ug'] == '13'
+    assert rows[0]['submitted'] == 5
+
+
+def test_get_cumulative_report_data_returns_list_of_dicts():
+    from modules.sms_processor import SmsProcessor
+
+    row = MagicMock()
+    row._asdict.return_value = {
+        'health_facility_ug': '14',
+        'week': 8,
+        'submitted': 20,
+        'delivered': 19,
+        'undelivered': 1,
+        'pending': 0,
+    }
+    engine, conn = make_engine_mock(fetchall_return=[row])
+    processor = SmsProcessor(config=make_config(), engine=engine)
+    rows = processor.get_cumulative_report_data()
+
+    assert rows[0]['submitted'] == 20
+    assert rows[0]['delivered'] == 19

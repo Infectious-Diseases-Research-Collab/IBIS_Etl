@@ -501,22 +501,55 @@ class SmsProcessor:
     # Weekly report data
     # ------------------------------------------------------------------
 
-    def get_weekly_report_data(self) -> list[dict]:
-        """Return SMS activity for the past 7 days grouped by facility and week."""
+    _WEEKLY_REPORT_SQL = """
+        WITH reached AS (
+            SELECT DISTINCT ON (l.queue_id)
+                b.health_facility_ug,
+                l.week,
+                l.delivery_status
+            FROM sms.log l
+            JOIN sms.queue     q ON q.id      = l.queue_id
+            JOIN ibis.baseline b ON b.subjid  = l.subjid
+            WHERE l.provider_message_id IS NOT NULL
+              AND l.status = 'sent'
+              AND b.countrycode = :countrycode
+              {date_filter}
+            ORDER BY l.queue_id, l.sent_at DESC
+        )
+        SELECT
+            health_facility_ug,
+            week,
+            COUNT(*)                                                           AS submitted,
+            COUNT(*) FILTER (WHERE delivery_status = 'DELIVERED')             AS delivered,
+            COUNT(*) FILTER (WHERE delivery_status IN ('FAILED', 'NOT_FOUND')) AS undelivered,
+            COUNT(*) FILTER (WHERE delivery_status IS NULL)                    AS pending
+        FROM reached
+        GROUP BY health_facility_ug, week
+        ORDER BY health_facility_ug, week
+    """
+
+    def get_weekly_report_data(self, week_start, week_end) -> list[dict]:
+        """
+        Return SMS stats for the study week [week_start, week_end).
+        Only counts messages that reached Blasta (have provider_message_id),
+        grouped by unique queue_id to avoid double-counting retried messages.
+        """
+        sql = self._WEEKLY_REPORT_SQL.format(
+            date_filter="AND l.sent_at >= :week_start AND l.sent_at < :week_end"
+        )
         with self._engine.connect() as conn:
-            rows = conn.execute(text("""
-                SELECT
-                    b.health_facility_ug,
-                    l.week,
-                    COUNT(*) FILTER (WHERE l.status = 'sent')   AS sent,
-                    COUNT(*) FILTER (WHERE l.status = 'failed') AS failed,
-                    COUNT(*) FILTER (WHERE q.opted_out = TRUE)  AS opted_out
-                FROM sms.log l
-                JOIN sms.queue    q ON q.id      = l.queue_id
-                JOIN ibis.baseline b ON b.subjid = l.subjid
-                WHERE l.created_at >= NOW() - INTERVAL '7 days'
-                  AND b.countrycode = :countrycode
-                GROUP BY b.health_facility_ug, l.week
-                ORDER BY b.health_facility_ug, l.week
-            """), {"countrycode": self._countrycode}).fetchall()
+            rows = conn.execute(text(sql), {
+                "countrycode": self._countrycode,
+                "week_start": week_start,
+                "week_end": week_end,
+            }).fetchall()
+        return [row._asdict() for row in rows]
+
+    def get_cumulative_report_data(self) -> list[dict]:
+        """Return all-time SMS stats, same structure as get_weekly_report_data."""
+        sql = self._WEEKLY_REPORT_SQL.format(date_filter="")
+        with self._engine.connect() as conn:
+            rows = conn.execute(text(sql), {
+                "countrycode": self._countrycode,
+            }).fetchall()
         return [row._asdict() for row in rows]
