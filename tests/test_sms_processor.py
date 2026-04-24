@@ -199,6 +199,24 @@ def test_blasta_client_sends_successfully():
     assert mock_post.call_count == 2
 
 
+def test_blasta_client_extracts_msg_id_from_detail():
+    """Blasta returns msg_id nested inside Detail[0] — should be promoted to top level."""
+    from modules.sms_processor import BlastaClient
+
+    with patch('modules.sms_processor.requests.post') as mock_post:
+        mock_post.side_effect = [
+            MagicMock(status_code=200, json=lambda: {'access_token': 'tok123'}),
+            MagicMock(status_code=200, json=lambda: {
+                'status_code': '201',
+                'Detail': [{'msg_id': 'D999', 'number': '0700000001'}],
+            }),
+        ]
+        client = BlastaClient('user', 'pass', max_retries=3)
+        result = client.send('0700000001', 'Hello')
+
+    assert result['msg_id'] == 'D999'
+
+
 def test_blasta_client_send_logs_warning_when_no_msg_id(caplog):
     """When API returns empty msg_id, send still succeeds but logs a warning."""
     import logging

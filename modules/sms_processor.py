@@ -121,10 +121,14 @@ class BlastaClient:
                     continue
                 resp.raise_for_status()
                 body = resp.json()
+                # Blasta returns msg_id nested in Detail[0]; fall back to top-level.
+                detail = body.get('Detail', [])
+                if detail and detail[0].get('msg_id'):
+                    body['msg_id'] = detail[0]['msg_id']
                 if not body.get('msg_id'):
                     logger.warning(
-                        "No msg_id in send response for %s — message may not be trackable",
-                        phone_number,
+                        "No msg_id in send response for %s — raw body: %s",
+                        phone_number, body,
                     )
                 return body
             except requests.RequestException as exc:
@@ -512,8 +516,7 @@ class SmsProcessor:
             FROM sms.log l
             JOIN sms.queue     q ON q.id      = l.queue_id
             JOIN ibis.baseline b ON b.subjid  = l.subjid
-            WHERE l.provider_message_id IS NOT NULL
-              AND l.status = 'sent'
+            WHERE l.status = 'sent'
               AND b.countrycode = :countrycode
               {date_filter}
             ORDER BY l.queue_id, l.sent_at DESC
