@@ -110,6 +110,7 @@ def _send(
     plain: str,
     html: str,
     attachment_df: pd.DataFrame | None = None,
+    attachment_filename: str | None = None,
 ) -> None:
     """Assemble a multipart email and send it via SMTP with STARTTLS."""
     ini_path = email_cfg['keyfiles']['smtp_ini']
@@ -139,7 +140,7 @@ def _send(
         part = MIMEBase('application', 'octet-stream')
         part.set_payload(csv_buffer.getvalue().encode('utf-8'))
         encoders.encode_base64(part)
-        filename = f'ibis_validation_{date.today().strftime("%Y-%m-%d")}.csv'
+        filename = attachment_filename or f'ibis_validation_{date.today().strftime("%Y-%m-%d")}.csv'
         part.add_header('Content-Disposition', f'attachment; filename="{filename}"')
         msg.attach(part)
 
@@ -325,6 +326,85 @@ def _build_weekly_sms_table(rows: list[dict], title: str) -> str:
     return '\n'.join(lines)
 
 
+def _build_weekly_sms_df(rows: list[dict], period_label: str) -> pd.DataFrame:
+    """
+    Build a formatted DataFrame matching the weekly SMS report layout:
+
+        <period_label>
+                          Site1   Site2  ...  Total    %
+        Due for 8wk SMS (n)  n     n         total
+        8wk SMS Outcome
+        §Delivered (n, %)    n(%) n(%)       total   overall%
+        § Failed (N, %)      n(%) n(%)       total   overall%
+        Due for 11wk SMS (n) ...
+    """
+    if not rows:
+        return pd.DataFrame()
+
+    all_sites = [
+        code for code in _UG_SITE_NAMES
+        if any(str(r['health_facility_ug']) == code for r in rows)
+    ]
+    site_names = [_UG_SITE_NAMES.get(c, c) for c in all_sites]
+    all_weeks = sorted({r['week'] for r in rows})
+    lookup = {(str(r['health_facility_ug']), r['week']): r for r in rows}
+
+    cols = [''] + site_names + ['Total', '%']
+
+    def blank() -> dict:
+        return {c: '' for c in cols}
+
+    def fmt_cell(count: int, site_total: int) -> str:
+        if site_total == 0:
+            return '0'
+        return f'{count} ({count / site_total * 100:.1f}%)'
+
+    records = []
+    records.append(blank() | {'': period_label})
+
+    for i, week in enumerate(all_weeks):
+        if i > 0:
+            records.append(blank())
+
+        submitted = [lookup.get((c, week), {}).get('submitted', 0) for c in all_sites]
+        delivered = [lookup.get((c, week), {}).get('delivered', 0) for c in all_sites]
+        failed    = [s - d for s, d in zip(submitted, delivered)]
+        tot_sub   = sum(submitted)
+        tot_del   = sum(delivered)
+        tot_fail  = sum(failed)
+
+        # Due row
+        due = blank() | {'': f'Due for {week}wk SMS (n)', 'Total': tot_sub}
+        for name, val in zip(site_names, submitted):
+            due[name] = val
+        records.append(due)
+
+        # Outcome section header
+        records.append(blank() | {'': f'{week}wk SMS Outcome'})
+
+        # Delivered row
+        del_row = blank() | {
+            '': '  • Delivered (n, %)',
+            'Total': tot_del,
+            '%': f'{tot_del / tot_sub * 100:.1f}%' if tot_sub else '',
+        }
+        for name, val, sub in zip(site_names, delivered, submitted):
+            del_row[name] = fmt_cell(val, sub)
+        records.append(del_row)
+
+        # Failed row
+        fail_row = blank() | {
+            '': '  • Failed (N, %)',
+            'Total': tot_fail,
+            '%': f'{tot_fail / tot_sub * 100:.1f}%' if tot_sub else '',
+        }
+        for name, val, sub in zip(site_names, failed, submitted):
+            fail_row[name] = fmt_cell(val, sub)
+        records.append(fail_row)
+
+    return pd.DataFrame(records, columns=cols)
+
+
 def _build_weekly_sms_report(weekly_rows: list[dict], cumulative_rows: list[dict], week_ending: str) -> str:
     """Build full weekly SMS report: this-week table + cumulative table."""
     parts = [
@@ -353,12 +433,13 @@ def send_sms_weekly_report(engine, config) -> None:
         logger.warning("No Uganda field recipients configured — weekly SMS report not sent.")
         return
 
-    # Thursday-to-Thursday window: last Thursday 00:00 to end of this Thursday
+    # Wednesday-to-Tuesday window: last Wednesday 00:00 to end of this Tuesday.
+    # Report is sent Wednesday morning covering the previous Wed–Tue period.
     today = date.today()
-    days_since_thursday = (today.weekday() - 3) % 7
-    this_thursday = today - timedelta(days=days_since_thursday)
-    week_start = this_thursday - timedelta(days=7)
-    week_end = this_thursday + timedelta(days=1)  # exclusive upper bound — includes all of Thursday
+    days_since_tuesday = (today.weekday() - 1) % 7
+    this_tuesday = today - timedelta(days=days_since_tuesday)
+    week_start = this_tuesday - timedelta(days=6)   # previous Wednesday
+    week_end = this_tuesday + timedelta(days=1)     # exclusive upper bound — includes all of Tuesday
 
     from modules.sms_processor import SmsProcessor
     processor = SmsProcessor(config=config, engine=engine)
@@ -369,13 +450,27 @@ def send_sms_weekly_report(engine, config) -> None:
         logger.info("No SMS activity — weekly report not sent.")
         return
 
-    week_ending_str = this_thursday.strftime('%d %b %Y')
+    week_ending_str = this_tuesday.strftime('%d %b %Y')
     subject = f'IBIS SMS Weekly Report \u2014 week ending {week_ending_str}'
     plain = _build_weekly_sms_report(weekly_rows, cumulative_rows, week_ending_str)
     html = f'<pre style="font-family:monospace;font-size:13px">{_html.escape(plain)}</pre>'
 
+    # Build CSV attachment in the formatted report layout,
+    # with a blank spacer row separating the two sections.
+    frames = []
+    if weekly_rows:
+        frames.append(_build_weekly_sms_df(weekly_rows, f'This week (ending {week_ending_str})'))
+    if weekly_rows and cumulative_rows:
+        frames.append(pd.DataFrame([{}]))
+    if cumulative_rows:
+        frames.append(_build_weekly_sms_df(cumulative_rows, 'Cumulative (all time)'))
+    attachment_df = pd.concat(frames, ignore_index=True) if frames else None
+
+    csv_filename = f'ibis_sms_report_{this_tuesday.strftime("%Y-%m-%d")}.csv'
+
     try:
-        _send(email_cfg, uganda_recipients, subject, plain, html)
+        _send(email_cfg, uganda_recipients, subject, plain, html,
+              attachment_df=attachment_df, attachment_filename=csv_filename)
         logger.info('Weekly SMS report sent to %s.', uganda_recipients)
     except Exception as exc:
         logger.error('Weekly SMS report email failed: %s', exc)
