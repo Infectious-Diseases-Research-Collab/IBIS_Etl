@@ -40,6 +40,26 @@ class PromoteIbis(BaseStage):
                 new_table = f'_new_{table}'
                 old_table = f'_old_{table}'
                 try:
+                    # Capture views that depend on ibis.{table} BEFORE the rename.
+                    # Their definitions reference ibis.{table} by name, so after the
+                    # swap completes they will correctly point to the new table.
+                    dep_views = conn.execute(text("""
+                        SELECT
+                            n.nspname   AS schema,
+                            c.relname   AS viewname,
+                            pg_get_viewdef(c.oid, true) AS definition
+                        FROM pg_depend d
+                        JOIN pg_rewrite r  ON r.oid      = d.objid
+                        JOIN pg_class   c  ON c.oid      = r.ev_class
+                        JOIN pg_namespace n ON n.oid     = c.relnamespace
+                        JOIN pg_class   t  ON t.oid      = d.refobjid
+                        JOIN pg_namespace tn ON tn.oid   = t.relnamespace
+                        WHERE d.deptype = 'n'
+                          AND c.relkind = 'v'
+                          AND tn.nspname = 'ibis'
+                          AND t.relname  = :table
+                    """), {"table": table}).fetchall()
+
                     conn.execute(text(f'DROP TABLE IF EXISTS ibis."{new_table}"'))
                     conn.execute(text(
                         f'CREATE TABLE ibis."{new_table}" AS '
@@ -52,7 +72,14 @@ class PromoteIbis(BaseStage):
                     conn.execute(text(
                         f'ALTER TABLE ibis."{new_table}" RENAME TO "{table}"'
                     ))
-                    conn.execute(text(f'DROP TABLE IF EXISTS ibis."{old_table}"'))
+                    conn.execute(text(f'DROP TABLE IF EXISTS ibis."{old_table}" CASCADE'))
+
+                    # Recreate any views dropped by CASCADE using the pre-rename definitions.
+                    for view in dep_views:
+                        conn.execute(text(
+                            f'CREATE OR REPLACE VIEW {view.schema}."{view.viewname}" AS {view.definition}'
+                        ))
+                        logger.info(f"  Recreated view: {view.schema}.{view.viewname}")
 
                     logger.info(f"  Promoted: gold_ibis.{table} → ibis.{table}")
                 except Exception as exc:
