@@ -270,7 +270,7 @@ def _build_sms_summary(results: dict[str, 'StageResult']) -> str | None:
 def _build_weekly_sms_table(rows: list[dict], title: str) -> str:
     """
     Build a transposed SMS stats table: sites as columns, weeks+metrics as rows.
-    rows: list of dicts with keys health_facility_ug, week, submitted, delivered,
+    rows: list of dicts with keys health_facility_ug, week, due, submitted, delivered,
           undelivered, pending.
     """
     if not rows:
