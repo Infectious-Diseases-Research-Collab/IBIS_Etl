@@ -559,12 +559,15 @@ class SmsProcessor:
 
     def get_weekly_report_data(self, week_start, week_end) -> list[dict]:
         """
-        Return SMS stats for the study week [week_start, week_end).
-        Only counts messages that reached Blasta (have provider_message_id),
-        grouped by unique queue_id to avoid double-counting retried messages.
+        Return SMS stats for the report window [week_start, week_end].
+        week_start = last Wednesday, week_end = this Wednesday (report day).
+        sent_at filter extends to end of Wednesday so today's sends are included.
+        scheduled_date filter uses week_end inclusive (Wednesday) for Due count.
         """
+        from datetime import timedelta
+        sent_end = week_end + timedelta(days=1)  # Thursday — captures all Wednesday sends
         sql = self._WEEKLY_REPORT_SQL.format(
-            date_filter="AND l.sent_at >= :week_start AND l.sent_at < :week_end",
+            date_filter="AND l.sent_at >= :week_start AND l.sent_at < :sent_end",
             due_date_filter="AND q.scheduled_date >= :week_start AND q.scheduled_date <= :week_end",
         )
         with self._engine.connect() as conn:
@@ -572,6 +575,7 @@ class SmsProcessor:
                 "countrycode": self._countrycode,
                 "week_start": week_start,
                 "week_end": week_end,
+                "sent_end": sent_end,
             }).fetchall()
         return [row._asdict() for row in rows]
 
