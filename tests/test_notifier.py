@@ -287,11 +287,11 @@ def test_build_weekly_sms_report_includes_sites_and_week_ending():
     from modules.notifier import _build_weekly_sms_report
 
     weekly_rows = [
-        {'health_facility_ug': '11', 'week': 8, 'submitted': 5, 'delivered': 4, 'undelivered': 1, 'pending': 0},
-        {'health_facility_ug': '14', 'week': 8, 'submitted': 3, 'delivered': 3, 'undelivered': 0, 'pending': 0},
+        {'health_facility_ug': '11', 'week': 8, 'due': 6, 'submitted': 5, 'delivered': 4, 'undelivered': 1, 'pending': 0},
+        {'health_facility_ug': '14', 'week': 8, 'due': 4, 'submitted': 3, 'delivered': 3, 'undelivered': 0, 'pending': 0},
     ]
     cumulative_rows = [
-        {'health_facility_ug': '11', 'week': 8, 'submitted': 20, 'delivered': 18, 'undelivered': 2, 'pending': 0},
+        {'health_facility_ug': '11', 'week': 8, 'due': 22, 'submitted': 20, 'delivered': 18, 'undelivered': 2, 'pending': 0},
     ]
     report = _build_weekly_sms_report(weekly_rows, cumulative_rows, '17 Apr 2026')
 
@@ -301,6 +301,12 @@ def test_build_weekly_sms_report_includes_sites_and_week_ending():
     assert 'Bushenyi HCIV' in report
     assert 'Ruhoko HCIV' in report
     assert 'Total' in report
+    assert 'Due' in report
+    assert 'Sent' in report
+    assert 'Failed' in report
+    assert 'Pending' in report
+    assert 'Submitted' not in report    # old label must be gone
+    assert 'Undelivered' not in report  # old label must be gone
 
 
 def test_build_weekly_sms_table_no_activity():

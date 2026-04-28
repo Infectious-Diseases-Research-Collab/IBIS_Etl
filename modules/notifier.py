@@ -290,7 +290,7 @@ def _build_weekly_sms_table(rows: list[dict], title: str) -> str:
 
     col_w = 17    # width of each site data column (longest name is 16 chars)
     week_w = 9    # "Week 11 " padded
-    metric_w = 13 # "Undelivered  " padded — longest metric label is 11 chars
+    metric_w = 13 # "Delivered    " padded — longest metric label is 9 chars
     label_w = week_w + metric_w  # 22
 
     sep = '─' * (label_w + col_w * len(all_sites) + col_w)
@@ -305,9 +305,10 @@ def _build_weekly_sms_table(rows: list[dict], title: str) -> str:
     lines = [title, sep, header, sep]
 
     metrics = [
-        ('submitted',   'Submitted'),
+        ('due',         'Due'),
+        ('submitted',   'Sent'),
         ('delivered',   'Delivered'),
-        ('undelivered', 'Undelivered'),
+        ('undelivered', 'Failed'),
         ('pending',     'Pending'),
     ]
 
