@@ -508,30 +508,49 @@ class SmsProcessor:
     # ------------------------------------------------------------------
 
     _WEEKLY_REPORT_SQL = """
-        WITH reached AS (
-            SELECT DISTINCT ON (l.queue_id)
-                b.health_facility_ug,
-                l.week,
-                l.delivery_status
-            FROM sms.log l
-            JOIN sms.queue     q ON q.id      = l.queue_id
-            JOIN ibis.baseline b ON b.subjid  = l.subjid
-            WHERE l.status = 'sent'
-              AND b.countrycode = :countrycode
-              {date_filter}
-            ORDER BY l.queue_id, l.sent_at DESC
-        )
+    WITH reached AS (
+        SELECT DISTINCT ON (l.queue_id)
+            b.health_facility_ug,
+            l.week,
+            l.delivery_status
+        FROM sms.log l
+        JOIN sms.queue     q ON q.id      = l.queue_id
+        JOIN ibis.baseline b ON b.subjid  = l.subjid
+        WHERE l.status = 'sent'
+          AND b.countrycode = :countrycode
+          {date_filter}
+        ORDER BY l.queue_id, l.sent_at DESC
+    ),
+    sent_counts AS (
         SELECT
             health_facility_ug,
             week,
-            COUNT(*)                                                           AS submitted,
-            COUNT(*) FILTER (WHERE delivery_status = 'DELIVERED')             AS delivered,
+            COUNT(*)                                                            AS submitted,
+            COUNT(*) FILTER (WHERE delivery_status = 'DELIVERED')              AS delivered,
             COUNT(*) FILTER (WHERE delivery_status IN ('FAILED', 'NOT_FOUND')) AS undelivered,
             COUNT(*) FILTER (WHERE delivery_status IS NULL)                    AS pending
         FROM reached
         GROUP BY health_facility_ug, week
-        ORDER BY health_facility_ug, week
-    """
+    ),
+    due_counts AS (
+        SELECT b.health_facility_ug, q.week, COUNT(*) AS due
+        FROM sms.queue q
+        JOIN ibis.baseline b ON b.subjid = q.subjid
+        WHERE b.countrycode = :countrycode
+        GROUP BY b.health_facility_ug, q.week
+    )
+    SELECT
+        s.health_facility_ug,
+        s.week,
+        COALESCE(d.due, 0) AS due,
+        s.submitted,
+        s.delivered,
+        s.undelivered,
+        s.pending
+    FROM sent_counts s
+    LEFT JOIN due_counts d USING (health_facility_ug, week)
+    ORDER BY s.health_facility_ug, s.week
+"""
 
     def get_weekly_report_data(self, week_start, week_end) -> list[dict]:
         """

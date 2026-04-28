@@ -638,6 +638,7 @@ def test_get_weekly_report_data_returns_list_of_dicts():
     row._asdict.return_value = {
         'health_facility_ug': '13',
         'week': 8,
+        'due': 6,
         'submitted': 5,
         'delivered': 4,
         'undelivered': 0,
@@ -653,6 +654,7 @@ def test_get_weekly_report_data_returns_list_of_dicts():
     assert len(rows) == 1
     assert rows[0]['health_facility_ug'] == '13'
     assert rows[0]['submitted'] == 5
+    assert rows[0]['due'] == 6
 
 
 def test_get_cumulative_report_data_returns_list_of_dicts():
@@ -662,6 +664,7 @@ def test_get_cumulative_report_data_returns_list_of_dicts():
     row._asdict.return_value = {
         'health_facility_ug': '14',
         'week': 8,
+        'due': 22,
         'submitted': 20,
         'delivered': 19,
         'undelivered': 1,
@@ -673,3 +676,4 @@ def test_get_cumulative_report_data_returns_list_of_dicts():
 
     assert rows[0]['submitted'] == 20
     assert rows[0]['delivered'] == 19
+    assert rows[0]['due'] == 22
