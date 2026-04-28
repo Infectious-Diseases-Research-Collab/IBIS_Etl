@@ -533,12 +533,13 @@ class SmsProcessor:
         GROUP BY health_facility_ug, week
     ),
     due_counts AS (
-        -- No date filter: due = total queue entries for (site, week), a fixed population count.
-        -- The calendar window on sent_counts controls which (site, week) rows appear in the result.
+        -- Participants with scheduled_date in the report window (Wed inclusive → Tue inclusive).
+        -- For cumulative, no date filter is applied.
         SELECT b.health_facility_ug, q.week, COUNT(*) AS due
         FROM sms.queue q
         JOIN ibis.baseline b ON b.subjid = q.subjid
         WHERE b.countrycode = :countrycode
+          {due_date_filter}
         GROUP BY b.health_facility_ug, q.week
     )
     SELECT
@@ -563,7 +564,8 @@ class SmsProcessor:
         grouped by unique queue_id to avoid double-counting retried messages.
         """
         sql = self._WEEKLY_REPORT_SQL.format(
-            date_filter="AND l.sent_at >= :week_start AND l.sent_at < :week_end"
+            date_filter="AND l.sent_at >= :week_start AND l.sent_at < :week_end",
+            due_date_filter="AND q.scheduled_date >= :week_start AND q.scheduled_date <= :week_end",
         )
         with self._engine.connect() as conn:
             rows = conn.execute(text(sql), {
@@ -575,7 +577,7 @@ class SmsProcessor:
 
     def get_cumulative_report_data(self) -> list[dict]:
         """Return all-time SMS stats, same structure as get_weekly_report_data."""
-        sql = self._WEEKLY_REPORT_SQL.format(date_filter="")
+        sql = self._WEEKLY_REPORT_SQL.format(date_filter="", due_date_filter="")
         with self._engine.connect() as conn:
             rows = conn.execute(text(sql), {
                 "countrycode": self._countrycode,
