@@ -533,6 +533,8 @@ class SmsProcessor:
         GROUP BY health_facility_ug, week
     ),
     due_counts AS (
+        -- No date filter: due = total queue entries for (site, week), a fixed population count.
+        -- The calendar window on sent_counts controls which (site, week) rows appear in the result.
         SELECT b.health_facility_ug, q.week, COUNT(*) AS due
         FROM sms.queue q
         JOIN ibis.baseline b ON b.subjid = q.subjid
@@ -547,6 +549,8 @@ class SmsProcessor:
         s.delivered,
         s.undelivered,
         s.pending
+    -- LEFT JOIN: only show (site, week) pairs where at least one message was sent.
+    -- (site, week) pairs with queued-but-never-sent messages are excluded intentionally.
     FROM sent_counts s
     LEFT JOIN due_counts d USING (health_facility_ug, week)
     ORDER BY s.health_facility_ug, s.week
