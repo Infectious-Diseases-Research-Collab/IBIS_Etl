@@ -313,3 +313,61 @@ def test_build_weekly_sms_table_no_activity():
     from modules.notifier import _build_weekly_sms_table
     result = _build_weekly_sms_table([], 'This week')
     assert 'No activity' in result
+
+
+def test_build_weekly_sms_df_five_rows_per_week():
+    from modules.notifier import _build_weekly_sms_df
+
+    rows = [
+        {
+            'health_facility_ug': '11',
+            'week': 8,
+            'due': 6,
+            'submitted': 5,
+            'delivered': 4,
+            'undelivered': 1,
+            'pending': 0,
+        }
+    ]
+    df = _build_weekly_sms_df(rows, 'This week (ending 22 Apr 2026)')
+
+    labels = df[''].tolist()
+    assert 'Due for 8wk SMS (n)'   in labels
+    assert '  • Sent (n, %)'       in labels
+    assert '  • Delivered (n, %)'  in labels
+    assert '  • Failed (N, %)'     in labels
+    assert '  • Pending (n, %)'    in labels
+    # Sent % is over Due: 5/6 = 83.3%
+    sent_row = df[df[''] == '  • Sent (n, %)'].iloc[0]
+    assert sent_row['%'] == '83.3%'
+    # Delivered % is over Sent: 4/5 = 80.0%
+    del_row = df[df[''] == '  • Delivered (n, %)'].iloc[0]
+    assert del_row['%'] == '80.0%'
+    # Failed % is over Sent: 1/5 = 20.0%
+    fail_row = df[df[''] == '  • Failed (N, %)'].iloc[0]
+    assert fail_row['%'] == '20.0%'
+    # Pending % is over Sent: 0/5 = 0.0%
+    pend_row = df[df[''] == '  • Pending (n, %)'].iloc[0]
+    assert pend_row['%'] == '0.0%'
+
+
+def test_build_weekly_sms_df_due_row_has_no_pct():
+    from modules.notifier import _build_weekly_sms_df
+
+    rows = [{'health_facility_ug': '11', 'week': 8, 'due': 6,
+             'submitted': 5, 'delivered': 4, 'undelivered': 1, 'pending': 0}]
+    df = _build_weekly_sms_df(rows, 'Test')
+    due_row = df[df[''] == 'Due for 8wk SMS (n)'].iloc[0]
+    assert due_row['%'] == ''
+    assert due_row['Total'] == 6
+
+
+def test_build_weekly_sms_df_zero_due_no_crash():
+    """When due is 0 (edge case), % cells should be empty strings, not errors."""
+    from modules.notifier import _build_weekly_sms_df
+
+    rows = [{'health_facility_ug': '11', 'week': 8, 'due': 0,
+             'submitted': 0, 'delivered': 0, 'undelivered': 0, 'pending': 0}]
+    df = _build_weekly_sms_df(rows, 'Test')
+    sent_row = df[df[''] == '  • Sent (n, %)'].iloc[0]
+    assert sent_row['%'] == ''

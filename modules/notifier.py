@@ -329,15 +329,16 @@ def _build_weekly_sms_table(rows: list[dict], title: str) -> str:
 
 def _build_weekly_sms_df(rows: list[dict], period_label: str) -> pd.DataFrame:
     """
-    Build a formatted DataFrame matching the weekly SMS report layout:
+    Build a formatted DataFrame matching the weekly SMS report layout.
 
-        <period_label>
-                          Site1   Site2  ...  Total    %
-        Due for 8wk SMS (n)  n     n         total
-        8wk SMS Outcome
-        §Delivered (n, %)    n(%) n(%)       total   overall%
-        § Failed (N, %)      n(%) n(%)       total   overall%
-        Due for 11wk SMS (n) ...
+    Columns: (blank label), site names, Total, %
+    Rows per week:
+      - Due for Xwk SMS (n)
+      - Xwk SMS Outcome           (section header)
+      - • Sent (n, %)             — % of Due
+      - • Delivered (n, %)        — % of Sent
+      - • Failed (N, %)           — % of Sent (confirmed failures only)
+      - • Pending (n, %)          — % of Sent
     """
     if not rows:
         return pd.DataFrame()
@@ -355,10 +356,15 @@ def _build_weekly_sms_df(rows: list[dict], period_label: str) -> pd.DataFrame:
     def blank() -> dict:
         return {c: '' for c in cols}
 
-    def fmt_cell(count: int, site_total: int) -> str:
-        if site_total == 0:
+    def fmt_cell(count: int, denom: int) -> str:
+        if denom == 0:
             return '0'
-        return f'{count} ({count / site_total * 100:.1f}%)'
+        return f'{count} ({count / denom * 100:.1f}%)'
+
+    def pct_str(num: int, denom: int) -> str:
+        if denom == 0:
+            return ''
+        return f'{num / denom * 100:.1f}%'
 
     records = []
     records.append(blank() | {'': period_label})
@@ -367,41 +373,66 @@ def _build_weekly_sms_df(rows: list[dict], period_label: str) -> pd.DataFrame:
         if i > 0:
             records.append(blank())
 
-        submitted = [lookup.get((c, week), {}).get('submitted', 0) for c in all_sites]
-        delivered = [lookup.get((c, week), {}).get('delivered', 0) for c in all_sites]
-        failed    = [s - d for s, d in zip(submitted, delivered)]
-        tot_sub   = sum(submitted)
-        tot_del   = sum(delivered)
-        tot_fail  = sum(failed)
+        due_vals    = [lookup.get((c, week), {}).get('due', 0)         for c in all_sites]
+        submitted   = [lookup.get((c, week), {}).get('submitted', 0)   for c in all_sites]
+        delivered   = [lookup.get((c, week), {}).get('delivered', 0)   for c in all_sites]
+        undelivered = [lookup.get((c, week), {}).get('undelivered', 0) for c in all_sites]
+        pending     = [lookup.get((c, week), {}).get('pending', 0)     for c in all_sites]
+
+        tot_due  = sum(due_vals)
+        tot_sent = sum(submitted)
+        tot_del  = sum(delivered)
+        tot_fail = sum(undelivered)
+        tot_pend = sum(pending)
 
         # Due row
-        due = blank() | {'': f'Due for {week}wk SMS (n)', 'Total': tot_sub}
-        for name, val in zip(site_names, submitted):
-            due[name] = val
-        records.append(due)
+        due_row = blank() | {'': f'Due for {week}wk SMS (n)', 'Total': tot_due}
+        for name, val in zip(site_names, due_vals):
+            due_row[name] = val
+        records.append(due_row)
 
         # Outcome section header
         records.append(blank() | {'': f'{week}wk SMS Outcome'})
 
-        # Delivered row
+        # Sent row — % of Due
+        sent_row = blank() | {
+            '': '  • Sent (n, %)',
+            'Total': tot_sent,
+            '%': pct_str(tot_sent, tot_due),
+        }
+        for name, val, d in zip(site_names, submitted, due_vals):
+            sent_row[name] = fmt_cell(val, d)
+        records.append(sent_row)
+
+        # Delivered row — % of Sent
         del_row = blank() | {
             '': '  • Delivered (n, %)',
             'Total': tot_del,
-            '%': f'{tot_del / tot_sub * 100:.1f}%' if tot_sub else '',
+            '%': pct_str(tot_del, tot_sent),
         }
         for name, val, sub in zip(site_names, delivered, submitted):
             del_row[name] = fmt_cell(val, sub)
         records.append(del_row)
 
-        # Failed row
+        # Failed row (confirmed failures only) — % of Sent
         fail_row = blank() | {
             '': '  • Failed (N, %)',
             'Total': tot_fail,
-            '%': f'{tot_fail / tot_sub * 100:.1f}%' if tot_sub else '',
+            '%': pct_str(tot_fail, tot_sent),
         }
-        for name, val, sub in zip(site_names, failed, submitted):
+        for name, val, sub in zip(site_names, undelivered, submitted):
             fail_row[name] = fmt_cell(val, sub)
         records.append(fail_row)
+
+        # Pending row — % of Sent
+        pend_row = blank() | {
+            '': '  • Pending (n, %)',
+            'Total': tot_pend,
+            '%': pct_str(tot_pend, tot_sent),
+        }
+        for name, val, sub in zip(site_names, pending, submitted):
+            pend_row[name] = fmt_cell(val, sub)
+        records.append(pend_row)
 
     return pd.DataFrame(records, columns=cols)
 
