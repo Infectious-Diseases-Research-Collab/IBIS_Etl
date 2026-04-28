@@ -363,7 +363,7 @@ def test_build_weekly_sms_df_due_row_has_no_pct():
 
 
 def test_build_weekly_sms_df_zero_due_no_crash():
-    """When due is 0 (edge case), % cells should be empty strings, not errors."""
+    """When due and submitted are 0, % cells and site cells should be empty strings."""
     from modules.notifier import _build_weekly_sms_df
 
     rows = [{'health_facility_ug': '11', 'week': 8, 'due': 0,
@@ -371,3 +371,8 @@ def test_build_weekly_sms_df_zero_due_no_crash():
     df = _build_weekly_sms_df(rows, 'Test')
     sent_row = df[df[''] == '  • Sent (n, %)'].iloc[0]
     assert sent_row['%'] == ''
+    assert sent_row['Bushenyi HCIV'] == ''
+    for label in ['  • Delivered (n, %)', '  • Failed (N, %)', '  • Pending (n, %)']:
+        row = df[df[''] == label].iloc[0]
+        assert row['%'] == ''
+        assert row['Bushenyi HCIV'] == ''

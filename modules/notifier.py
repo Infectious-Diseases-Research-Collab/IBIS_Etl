@@ -358,7 +358,7 @@ def _build_weekly_sms_df(rows: list[dict], period_label: str) -> pd.DataFrame:
 
     def fmt_cell(count: int, denom: int) -> str:
         if denom == 0:
-            return '0'
+            return ''
         return f'{count} ({count / denom * 100:.1f}%)'
 
     def pct_str(num: int, denom: int) -> str:
