@@ -138,7 +138,7 @@ def _send(
             )
         safe_df.to_csv(csv_buffer, index=False)
         part = MIMEBase('application', 'octet-stream')
-        part.set_payload(csv_buffer.getvalue().encode('utf-8'))
+        part.set_payload(csv_buffer.getvalue().encode('utf-8-sig'))
         encoders.encode_base64(part)
         filename = attachment_filename or f'ibis_validation_{date.today().strftime("%Y-%m-%d")}.csv'
         part.add_header('Content-Disposition', f'attachment; filename="{filename}"')
