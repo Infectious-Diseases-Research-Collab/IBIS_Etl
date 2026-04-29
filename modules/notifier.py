@@ -456,13 +456,9 @@ def send_sms_weekly_report(engine, config) -> None:
     if not email_cfg:
         return
 
-    field_recipients_cfg = email_cfg.get('field_recipients', {})
-    uganda_recipients = next(
-        (v for k, v in field_recipients_cfg.items() if k.lower() == 'uganda'),
-        [],
-    )
+    uganda_recipients = email_cfg.get('sms_dm_recipients', [])
     if not uganda_recipients:
-        logger.warning("No Uganda field recipients configured — weekly SMS report not sent.")
+        logger.warning("No sms_dm_recipients configured — weekly SMS report not sent.")
         return
 
     # Wednesday-to-Tuesday window: last Wednesday 00:00 to end of this Tuesday.
