@@ -580,10 +580,16 @@ class SmsProcessor:
         return [row._asdict() for row in rows]
 
     def get_cumulative_report_data(self) -> list[dict]:
-        """Return all-time SMS stats, same structure as get_weekly_report_data."""
-        sql = self._WEEKLY_REPORT_SQL.format(date_filter="", due_date_filter="")
+        """Return cumulative SMS stats up to today.
+        sent_counts: all-time sends. due_counts: participants whose scheduled_date <= today."""
+        from datetime import date
+        sql = self._WEEKLY_REPORT_SQL.format(
+            date_filter="",
+            due_date_filter="AND q.scheduled_date <= :report_date",
+        )
         with self._engine.connect() as conn:
             rows = conn.execute(text(sql), {
                 "countrycode": self._countrycode,
+                "report_date": date.today(),
             }).fetchall()
         return [row._asdict() for row in rows]
