@@ -593,3 +593,27 @@ class SmsProcessor:
                 "report_date": date.today(),
             }).fetchall()
         return [row._asdict() for row in rows]
+
+    def get_delivery_linelist(self) -> list[dict]:
+        """Return one row per sent message with delivery status, for all time."""
+        sql = text("""
+            SELECT
+                l.subjid,
+                b.health_facility_ug                        AS site_code,
+                l.week,
+                q.arm_text,
+                q.language,
+                q.mobile_number,
+                q.scheduled_date,
+                l.sent_at                                   AT TIME ZONE 'UTC' AT TIME ZONE 'Africa/Kampala' AS sent_at_eat,
+                COALESCE(l.delivery_status, 'Pending')      AS delivery_status
+            FROM sms.log l
+            JOIN sms.queue q  ON q.id = l.queue_id
+            JOIN ibis.baseline b ON b.subjid = l.subjid
+            WHERE l.status = 'sent'
+              AND b.countrycode = :countrycode
+            ORDER BY b.health_facility_ug, l.week, l.sent_at
+        """)
+        with self._engine.connect() as conn:
+            rows = conn.execute(sql, {"countrycode": self._countrycode}).fetchall()
+        return [row._asdict() for row in rows]

@@ -103,6 +103,22 @@ def _build_validation_summary(report_df: pd.DataFrame | None) -> str:
     return '\n'.join(lines)
 
 
+def _attach_csv(msg: MIMEMultipart, df: pd.DataFrame, filename: str) -> None:
+    """Sanitise and attach a DataFrame as a UTF-8 CSV to a MIME message."""
+    csv_buffer = io.StringIO()
+    safe_df = df.copy()
+    for col in safe_df.select_dtypes(include='object').columns:
+        safe_df[col] = safe_df[col].map(
+            lambda v: ("'" + v) if isinstance(v, str) and v and v[0] in ('=', '+', '-', '@', '\t', '\r') else v
+        )
+    safe_df.to_csv(csv_buffer, index=False)
+    part = MIMEBase('application', 'octet-stream')
+    part.set_payload(csv_buffer.getvalue().encode('utf-8-sig'))
+    encoders.encode_base64(part)
+    part.add_header('Content-Disposition', f'attachment; filename="{filename}"')
+    msg.attach(part)
+
+
 def _send(
     email_cfg: dict,
     recipients: list[str],
@@ -111,6 +127,7 @@ def _send(
     html: str,
     attachment_df: pd.DataFrame | None = None,
     attachment_filename: str | None = None,
+    extra_attachments: list[tuple[pd.DataFrame, str]] | None = None,
 ) -> None:
     """Assemble a multipart email and send it via SMTP with STARTTLS."""
     ini_path = email_cfg['keyfiles']['smtp_ini']
@@ -129,20 +146,11 @@ def _send(
     msg.attach(alt)
 
     if attachment_df is not None:
-        csv_buffer = io.StringIO()
-        # Sanitise cells to prevent formula injection when opened in Excel/LibreOffice.
-        safe_df = attachment_df.copy()
-        for col in safe_df.select_dtypes(include='object').columns:
-            safe_df[col] = safe_df[col].map(
-                lambda v: ("'" + v) if isinstance(v, str) and v and v[0] in ('=', '+', '-', '@', '\t', '\r') else v
-            )
-        safe_df.to_csv(csv_buffer, index=False)
-        part = MIMEBase('application', 'octet-stream')
-        part.set_payload(csv_buffer.getvalue().encode('utf-8-sig'))
-        encoders.encode_base64(part)
         filename = attachment_filename or f'ibis_validation_{date.today().strftime("%Y-%m-%d")}.csv'
-        part.add_header('Content-Disposition', f'attachment; filename="{filename}"')
-        msg.attach(part)
+        _attach_csv(msg, attachment_df, filename)
+
+    for df, fname in (extra_attachments or []):
+        _attach_csv(msg, df, fname)
 
     with smtplib.SMTP(email_cfg['smtp_host'], email_cfg['smtp_port']) as smtp:
         smtp.starttls(context=ssl.create_default_context())
@@ -496,9 +504,19 @@ def send_sms_weekly_report(engine, config) -> None:
 
     csv_filename = f'ibis_sms_report_{this_tuesday.strftime("%Y-%m-%d")}.csv'
 
+    # Build delivery linelist — all messages sent to date, one row per message.
+    linelist_rows = processor.get_delivery_linelist()
+    linelist_df = pd.DataFrame(linelist_rows) if linelist_rows else None
+    if linelist_df is not None:
+        linelist_df.columns = ['Subject ID', 'Site', 'Week', 'Arm', 'Language',
+                               'Mobile', 'Scheduled Date', 'Sent At (EAT)', 'Delivery Status']
+    linelist_filename = f'ibis_sms_linelist_{this_tuesday.strftime("%Y-%m-%d")}.csv'
+
     try:
+        extra = [(linelist_df, linelist_filename)] if linelist_df is not None else []
         _send(email_cfg, uganda_recipients, subject, plain, html,
-              attachment_df=attachment_df, attachment_filename=csv_filename)
+              attachment_df=attachment_df, attachment_filename=csv_filename,
+              extra_attachments=extra)
         logger.info('Weekly SMS report sent to %s.', uganda_recipients)
     except Exception as exc:
         logger.error('Weekly SMS report email failed: %s', exc)
