@@ -32,7 +32,8 @@ Creates `secrets/BLASTA.ini` and `secrets/BLASTA.key`. Keep both files secure �
     "blasta_ini":   "secrets/BLASTA.ini",
     "blasta_key":   "secrets/BLASTA.key",
     "max_retries":  3,
-    "dry_run":      false
+    "dry_run":      false,
+    "countrycode":  "1"
 }
 ```
 
@@ -63,11 +64,20 @@ docker compose run --rm etl python ibis.py -a
 ### Standalone
 
 ```bash
-docker compose run --rm etl python sms.py              # sync queue + send today's messages
-docker compose run --rm etl python sms.py --dry-run    # log what would be sent, nothing sent
-docker compose run --rm etl python sms.py --sync       # sync queue only, no sending
+docker compose run --rm etl python sms.py                  # sync queue + send today's messages
+docker compose run --rm etl python sms.py --dry-run        # log what would be sent, nothing sent
+docker compose run --rm etl python sms.py --sync           # sync queue only, no sending
+docker compose run --rm etl python sms.py --check-delivery # poll BLASTA for DLR status updates
 docker compose run --rm etl python sms.py --weekly-report  # send weekly facility report email
 ```
+
+---
+
+## Delivery receipts (DLR)
+
+After messages are sent, BLASTA asynchronously updates delivery status. The `--check-delivery` job polls BLASTA for each message that is still `pending` in `sms.log` and writes the result (`DELIVERED`, `FAILED`, or `NOT_FOUND`) back to `sms.log.delivery_status`.
+
+Run this job one hour after the pipeline sends messages so most receipts have had time to arrive.
 
 ---
 
@@ -77,9 +87,9 @@ docker compose run --rm etl python sms.py --weekly-report  # send weekly facilit
 
 ```sql
 SELECT l.subjid, q.mobile_number, q.arm_text, q.language, q.week,
-       q.scheduled_date, l.status, l.provider_message_id, l.sent_at
+       q.scheduled_date, l.status, l.delivery_status, l.provider_message_id, l.sent_at
 FROM sms.log l
-JOIN sms.queue q ON q.subjid = l.subjid AND q.week = l.week
+JOIN sms.queue q ON q.id = l.queue_id
 WHERE l.status = 'sent'
 ORDER BY l.sent_at DESC;
 ```
@@ -90,7 +100,7 @@ ORDER BY l.sent_at DESC;
 SELECT q.subjid, q.mobile_number, q.arm_text, q.week,
        l.error_message, l.created_at
 FROM sms.log l
-JOIN sms.queue q ON q.subjid = l.subjid AND q.week = l.week
+JOIN sms.queue q ON q.id = l.queue_id
 WHERE l.status = 'failed'
 ORDER BY l.created_at DESC;
 ```
@@ -99,6 +109,16 @@ ORDER BY l.created_at DESC;
 
 ```sql
 SELECT status, COUNT(*) FROM sms.queue GROUP BY status ORDER BY status;
+```
+
+### Delivery status summary (current week)
+
+```sql
+SELECT delivery_status, COUNT(*)
+FROM sms.log
+WHERE status = 'sent'
+  AND sent_at >= date_trunc('week', NOW())
+GROUP BY delivery_status;
 ```
 
 ---
@@ -163,27 +183,54 @@ Arms with no template (Control SOC, Incentive) are silently skipped.
 |---|---|
 | `sms.templates` | Message content seeded from Excel files |
 | `sms.queue` | One row per participant × week. Idempotent — safe to re-sync. |
-| `sms.log` | Append-only audit log of every send attempt |
+| `sms.log` | Append-only audit log of every send attempt, including delivery status |
 | `sms.opt_outs` | Participants who should never receive messages |
+| `sms.message_status` | View: one row per participant/week with consolidated delivery status |
 
 ---
 
 ## Scheduling (cron)
 
-| Job | Schedule | Command |
-|---|---|---|
-| Full pipeline (includes SMS) | Daily at 2 AM | `python ibis.py -a` |
-| Standalone SMS | Daily at 9 AM | `python sms.py` |
-| Weekly facility report | Monday at 7 AM | `python sms.py --weekly-report` |
+All times are **EAT (Uganda time, UTC+3)**. The container runs UTC; cron expressions are stored in UTC.
 
-The 9 AM standalone job is idempotent — if the 2 AM pipeline already sent messages, it finds nothing pending and exits cleanly.
+| Job | EAT time | UTC cron | Command |
+|---|---|---|---|
+| Full pipeline (includes SMS sending) | Daily 9:00 AM | `0 6 * * *` | `python ibis.py -a` |
+| DLR check | Daily 10:00 AM | `0 7 * * *` | `python sms.py --check-delivery` |
+| Weekly facility report | Wednesday 10:30 AM | `30 7 * * 3` | `python sms.py --weekly-report` |
+| Store snapshot | Sunday 6:00 AM | `0 3 * * 0` | `python ibis.py -p store_ibis` |
+
+Schedules are read from `config.json` at container startup. To change them, edit `config.json` and run `docker compose restart etl`.
+
+---
+
+## Weekly facility report
+
+Sent every Wednesday morning to data managers (`sms_dm_recipients` in `config.json`). Covers the week ending the previous Tuesday (Wednesday–Tuesday).
+
+The report contains two sheets:
+
+**Weekly** — metrics for the current week only (Wed–Tue):
+
+| Metric | Description | % denominator |
+|---|---|---|
+| Due | Participants with `scheduled_date` in the week window | — |
+| Sent | Messages that reached BLASTA | % of Due |
+| Delivered | DLR-confirmed delivery | % of Sent |
+| Failed | DLR-confirmed failure | % of Sent |
+| Pending | No DLR received yet | % of Sent |
+
+**Cumulative** — same metrics for all messages sent to date, with `Due` showing all participants scheduled up to today.
+
+Rows are grouped by health facility and study week (Wk 8 / Wk 11). Sites with no sends yet (e.g., earliest scheduled date in the future) do not appear until their first message is sent.
 
 ---
 
 ## Files
 
 ```
-modules/sms_processor.py          Core SMS logic (queue sync, template resolution, BLASTA client)
+modules/sms_processor.py          Core SMS logic (queue sync, template resolution, BLASTA client, DLR check)
+modules/notifier.py               Email notifications — includes weekly SMS report builder
 stages/send_sms.py                ETL stage wrapper
 sms.py                            Standalone CLI entry point
 scripts/encrypt_blasta_creds.py   One-time credential encryption
