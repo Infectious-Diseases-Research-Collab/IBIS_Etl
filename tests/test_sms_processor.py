@@ -338,6 +338,18 @@ def test_get_due_messages_returns_list_of_dicts():
     assert result[0]['subjid'] == 'IBIS001'
 
 
+def test_get_due_messages_includes_overdue():
+    """get_due_messages picks up messages with scheduled_date before today (catch-up)."""
+    from modules.sms_processor import SmsProcessor
+
+    engine, conn = make_engine_mock(fetchall_return=[])
+    processor = SmsProcessor(config=make_config(), engine=engine)
+    processor.get_due_messages()
+
+    sql = conn.execute.call_args[0][0].text
+    assert '<= CURRENT_DATE' in sql or '<= current_date' in sql.lower()
+
+
 # ---------------------------------------------------------------------------
 # SmsProcessor.send_due_messages — dry run
 # ---------------------------------------------------------------------------
