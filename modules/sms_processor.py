@@ -121,6 +121,11 @@ class BlastaClient:
                     continue
                 resp.raise_for_status()
                 body = resp.json()
+                # Treat application-level errors (e.g. insufficient credits) as failures.
+                if body.get('error'):
+                    raise requests.RequestException(
+                        f"Blasta API error: {body['error']} (raw: {body})"
+                    )
                 # Blasta returns msg_id nested in Detail[0]; fall back to top-level.
                 detail = body.get('Detail', [])
                 if detail and detail[0].get('msg_id'):
