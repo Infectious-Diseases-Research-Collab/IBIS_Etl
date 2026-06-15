@@ -6,7 +6,7 @@ A containerised data pipeline that downloads field tablet data from an SFTP serv
 
 ## Architecture
 
-The pipeline follows a **medallion architecture** across five PostgreSQL schemas, executed as seven sequential stages:
+The pipeline follows a **medallion architecture** across five PostgreSQL schemas, executed as eight sequential stages:
 
 ```
 SFTP server → Downloads/ → Extracted/  →  bronze_ibis  →  silver_ibis  →  gold_ibis  →    →  store_ibis
@@ -19,7 +19,7 @@ SFTP server → Downloads/ → Extracted/  →  bronze_ibis  →  silver_ibis  �
 | 2 | `MdbToBronze` | Exports MDB tables via `mdb-export`, stores all columns as TEXT. Skips files already loaded (by path + last-modified). |
 | 3 | `BronzeToSilver` | Deduplicates by `uniqueid`, filters cross-country contamination by `countrycode`. |
 | 4 | `TransformIbis` | Executes SQL files in `sql/transform/` to build dimension tables in `gold_ibis`. |
-| 5 | `MeasuresIbis` | Runs 23 data-quality checks via `DataValidator`, writes results to `gold_ibis.ds_validation_report`. Executes SQL files in `sql/measures/`. |
+| 5 | `MeasuresIbis` | Runs 24 data-quality checks via `DataValidator`, writes results to `gold_ibis.ds_validation_report`. Executes SQL files in `sql/measures/`. |
 | 6 | `PromoteIbis` | Atomically copies all `gold_ibis` tables to the production `ibis` schema. |
 | 7 | `SendSms` | Syncs `sms.queue` from `ibis.baseline`, then sends due SMS messages to Uganda participants via BLASTA. See [SMS.md](SMS.md). |
 | 8 | `StoreIbis` | Appends a dated snapshot of each `ibis` table into `store_ibis` (idempotent — skips if today's snapshot already exists). |
@@ -128,7 +128,7 @@ docker compose exec db psql -U ibis_user -d ibis
 | `excluded_tablets` | List of tablet IDs to skip during ingestion |
 | `db` | PostgreSQL connection details (`host`, `port`, `name`, `user`, `password_secret_file`) |
 | `trial` | `dedup_key`, `country_code_map` (country → integer countrycode) |
-| `schedule` | `pipeline_cron`, `store_cron`, `dlr_cron`, `sms_weekly_report_cron` in standard cron format (UTC) |
+| `schedule` | `pipeline_cron`, `store_cron`, `dlr_cron`, `sms_weekly_report_cron`, `incentive_report_cron`, `backup_cron` in standard cron format (UTC) |
 | `email` | *(optional)* SMTP settings for pipeline notifications — see below |
 
 `password_secret_file` points to the Docker secret mounted at `/run/secrets/db_password` — the password never appears in `config.json` or environment variables.
@@ -263,7 +263,7 @@ docker compose run --rm etl python ibis.py -a -v     # verbose logging
 ## Deployment notes
 
 - The `db` service uses a named Docker volume (`pgdata`) so data persists across container restarts.
-- Logs are written inside the container under `/var/log/ibis/`: `pipeline.log`, `store.log`, `dlr.log`, `sms_report.log`. Mount a host volume or use `docker compose logs` to access them.
+- Logs are written inside the container under `/var/log/ibis/`: `pipeline.log`, `store.log`, `dlr.log`, `sms_report.log`, `incentive_report.log`, `backup.log`. Mount a host volume or use `docker compose logs` to access them.
 - To change the cron schedule, edit `config.json` and run `docker compose restart etl`.
 - The pipeline is idempotent: re-running after a partial failure will skip already-extracted tablets, already-loaded MDB files, and already-snapshotted store tables.
 - Tablet archives (`.7z`) are deleted from `Downloads/` after successful extraction. The originals on the SFTP server are never modified.
