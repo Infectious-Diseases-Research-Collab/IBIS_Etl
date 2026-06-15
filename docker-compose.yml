@@ -39,6 +39,7 @@ services:
     secrets:
       - db_password
     volumes:
+      - .:/app
       - ./config.json:/app/config.json:ro
       - ./secrets:/app/secrets:ro
       - ./Downloads:/app/Downloads
