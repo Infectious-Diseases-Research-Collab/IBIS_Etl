@@ -10,7 +10,7 @@ logger = logging.getLogger(__name__)
 
 class SendSms(BaseStage):
     name = 'send_sms'
-    dependencies: list[str] = ['promote_ibis']
+    dependencies: list[str] = []
 
     def run(self) -> StageResult:
         processor = SmsProcessor(config=self.config, engine=self.engine)
