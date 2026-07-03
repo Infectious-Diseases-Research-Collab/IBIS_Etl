@@ -15,4 +15,5 @@ ALTER TABLE gold_ibis.followup
     DROP COLUMN IF EXISTS run_uuid,
     DROP COLUMN IF EXISTS file_name,
     DROP COLUMN IF EXISTS file_path,
-    DROP COLUMN IF EXISTS extracted_at;
+    DROP COLUMN IF EXISTS extracted_at,
+    DROP COLUMN IF EXISTS updated_at;

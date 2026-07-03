@@ -69,8 +69,14 @@ def test_new_files_are_cleaned_and_written_then_marked_promoted():
 
     assert result.success
     assert result.rows_written == 1
-    mock_append.assert_called_once()
-    mock_ensure.assert_called_once()
+    # append_history/ensure_current_table now run for BOTH baseline (has
+    # data) and followup (empty df) — tables must exist even for an
+    # all-empty batch, or the next downstream read crashes with "relation
+    # does not exist" (see test_creates_tables_even_when_batch_produces_zero_rows).
+    assert mock_append.call_count == 2
+    assert mock_ensure.call_count == 2
+    # upsert_latest is still only called once: baseline has real data,
+    # followup's empty `cleaned` correctly skips the upsert call.
     mock_upsert.assert_called_once()
 
     update_calls = [
@@ -238,3 +244,120 @@ def test_incremental_multi_batch_matches_full_rebuild():
     full_rebuild_final = dict(zip(rebuilt['uniqueid'], rebuilt['value']))
 
     assert incremental_final == full_rebuild_final == {'a': 'corrected', 'b': 'new'}
+
+
+def test_full_rebuild_aborts_without_truncating_when_any_country_fails():
+    """A partial rebuild is worse than no rebuild: if any country's cleaning
+    raises during --full-rebuild, `cleaned` is missing that country's data
+    entirely. Truncating+replacing the live table with it would silently
+    and permanently wipe that country's data from production, so the stage
+    must refuse to touch the live table at all and leave the existing
+    (possibly stale, but complete) table untouched."""
+    engine = MagicMock()
+    conn = MagicMock()
+    conn.execute.return_value.scalar.return_value = 1
+    engine.begin.return_value.__enter__ = MagicMock(return_value=conn)
+    engine.begin.return_value.__exit__ = MagicMock(return_value=False)
+
+    row = pd.DataFrame({
+        'uniqueid': ['a'], 'countrycode': [2], 'country': ['kenya'],
+        'extracted_at': pd.to_datetime(['2026-01-01']),
+    })
+
+    with patch('stages.bronze_to_silver.pd.read_sql', return_value=row), \
+         patch('stages.bronze_to_silver.clean_full_history',
+               return_value=(row, ["[broken] Failed during cleaning: boom"], {'broken'})), \
+         patch.object(pd.DataFrame, 'to_sql') as mock_to_sql:
+        stage = BronzeToSilver(config=_make_config(), engine=engine)
+        result = stage.run(full_rebuild=True)
+
+    assert not result.success
+    assert any('broken' in e or 'aborted' in e for e in result.errors)
+
+    executed_sql = [str(c.args[0]) for c in conn.execute.call_args_list]
+    assert not any('TRUNCATE' in s for s in executed_sql)
+    mock_to_sql.assert_not_called()
+
+
+def test_never_issues_update_or_delete_against_history_tables():
+    """append_history/ensure_current_table/upsert_latest run for real (not
+    mocked) against a mocked `conn` — only pd.read_sql and
+    pd.DataFrame.to_sql are stubbed. No SQL string touching a `_history`
+    table may contain UPDATE or DELETE: history is the permanent,
+    append-only record of every cleaned version of every record ever seen,
+    and any to_sql() call targeting a history table must use
+    if_exists='append', never 'replace'."""
+    engine = MagicMock()
+    conn = _make_conn_with_meta(['run-1'])
+    engine.begin.return_value.__enter__ = MagicMock(return_value=conn)
+    engine.begin.return_value.__exit__ = MagicMock(return_value=False)
+
+    bronze_df = pd.DataFrame({
+        'uniqueid': ['a'], 'countrycode': [2], 'country': ['kenya'],
+        'extracted_at': pd.to_datetime(['2026-01-01']), 'run_uuid': ['run-1'],
+    })
+
+    with patch('stages.bronze_to_silver.pd.read_sql', return_value=bronze_df), \
+         patch.object(pd.DataFrame, 'to_sql') as mock_to_sql:
+        stage = BronzeToSilver(config=_make_config(), engine=engine)
+        result = stage.run()
+
+    assert result.success
+
+    executed_sql = [str(c.args[0]) for c in conn.execute.call_args_list]
+    for sql in executed_sql:
+        upper = sql.upper()
+        if '_HISTORY' in upper and ('UPDATE' in upper or 'DELETE' in upper):
+            pytest.fail(f"UPDATE/DELETE issued against a history table: {sql}")
+
+    for call in mock_to_sql.call_args_list:
+        table_name = call.args[0] if call.args else call.kwargs.get('name')
+        if table_name and table_name.endswith('_history'):
+            if_exists = call.kwargs.get('if_exists', call.args[2] if len(call.args) > 2 else None)
+            assert if_exists == 'append', (
+                f"to_sql against history table '{table_name}' used if_exists={if_exists!r}"
+            )
+
+
+def test_creates_tables_even_when_batch_produces_zero_rows():
+    """A batch that legitimately produces zero surviving rows (no country
+    failed — cleaning just filtered everything out) must still create
+    silver_ibis.<table>_history/<table> so the very next downstream read
+    doesn't crash with "relation does not exist" until some later,
+    non-empty batch happens to create the table. upsert_latest is skipped
+    (nothing to upsert) but the run_uuid is still promoted since nothing
+    failed."""
+    engine = MagicMock()
+    conn = _make_conn_with_meta(['run-1'])
+    engine.begin.return_value.__enter__ = MagicMock(return_value=conn)
+    engine.begin.return_value.__exit__ = MagicMock(return_value=False)
+
+    bronze_df = pd.DataFrame({
+        'uniqueid': ['a'], 'countrycode': [2], 'country': ['kenya'],
+        'extracted_at': pd.to_datetime(['2026-01-01']), 'run_uuid': ['run-1'],
+    })
+    empty_cleaned = bronze_df.iloc[0:0]
+
+    with patch('stages.bronze_to_silver.pd.read_sql', return_value=bronze_df), \
+         patch('stages.bronze_to_silver.clean_full_history',
+               return_value=(empty_cleaned, [], set())), \
+         patch('stages.bronze_to_silver.append_history') as mock_append, \
+         patch('stages.bronze_to_silver.ensure_current_table') as mock_ensure, \
+         patch('stages.bronze_to_silver.upsert_latest') as mock_upsert:
+        stage = BronzeToSilver(config=_make_config(), engine=engine)
+        result = stage.run()
+
+    assert result.success
+    # Both baseline and followup hit the same mocked clean_full_history
+    # here, so both must still create their (empty) tables.
+    assert mock_append.call_count == 2
+    assert mock_ensure.call_count == 2
+    mock_upsert.assert_not_called()
+
+    update_calls = [
+        c for c in conn.execute.call_args_list
+        if 'UPDATE bronze_ibis.meta SET promoted_to_silver_at' in str(c.args[0])
+    ]
+    assert update_calls
+    for call in update_calls:
+        assert call.args[1]['uuids'] == ['run-1']

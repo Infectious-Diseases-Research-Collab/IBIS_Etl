@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import re
 
 import pandas as pd
 from sqlalchemy import text
@@ -11,6 +12,13 @@ from stages.base import BaseStage, StageResult
 logger = logging.getLogger(__name__)
 
 _TABLES = ('baseline', 'followup')
+
+
+def _validate_table_name(name: str) -> str:
+    """Reject names that could break SQL identifier quoting."""
+    if not re.match(r'^[a-z_][a-z0-9_]*$', name):
+        raise ValueError(f"Invalid table name: '{name}'")
+    return name
 
 
 class ReconcileSilver(BaseStage):
@@ -54,6 +62,7 @@ class ReconcileSilver(BaseStage):
 
     def _check_table(self, conn, table_name: str, dedup_key: str, country_code_map: dict) -> bool:
         """Returns True if drift was found for this table."""
+        _validate_table_name(table_name)
         bronze_df = pd.read_sql(f'SELECT * FROM bronze_ibis.{table_name}', conn)
         rebuilt, clean_errors, failed_countries = clean_full_history(bronze_df, dedup_key, country_code_map)
         if failed_countries:

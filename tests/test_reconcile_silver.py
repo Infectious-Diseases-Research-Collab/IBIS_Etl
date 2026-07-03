@@ -1,4 +1,5 @@
 import pandas as pd
+import pytest
 from unittest.mock import MagicMock, patch
 
 from stages.reconcile_silver import ReconcileSilver
@@ -56,3 +57,18 @@ def test_reports_drift_when_row_counts_differ():
 
     assert not result.success
     assert 'baseline' in result.metadata['drifted_tables']
+
+
+def test_check_table_rejects_invalid_table_name():
+    """table_name and the derived shadow_table are interpolated directly
+    into raw SQL strings — an unvalidated identifier could break out of
+    quoting. _check_table must validate table_name before building any SQL,
+    matching the allow-listing pattern used elsewhere in the project (see
+    stages/promote_ibis.py's _validate_table_name and
+    modules/incremental_writer.py)."""
+    engine = MagicMock()
+    conn = MagicMock()
+    stage = ReconcileSilver(config=_make_config(), engine=engine)
+
+    with pytest.raises(ValueError):
+        stage._check_table(conn, 'baseline; DROP TABLE x', 'uniqueid', {'kenya': 2})

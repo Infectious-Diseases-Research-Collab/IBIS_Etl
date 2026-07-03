@@ -65,10 +65,21 @@ class BronzeToSilver(BaseStage):
 
         cleaned, errors, failed_countries = clean_full_history(bronze_df, dedup_key, country_code_map)
 
+        # append_history/ensure_current_table always run, even when `cleaned`
+        # is empty: append_history's underlying to_sql(if_exists='append')
+        # creates the table from the DataFrame's column/dtype info even with
+        # zero rows (the same trick _full_rebuild_table's bootstrap logic
+        # uses), so a batch that legitimately produces zero surviving rows
+        # (no country failed — the data or config just filtered everything
+        # out) still leaves silver_ibis.<table>_history/<table> in existence
+        # for downstream readers instead of crashing with "relation does not
+        # exist" until some later, non-empty batch happens to create it.
+        # upsert_latest is skipped when empty purely as a no-op optimization
+        # (it already no-ops safely on empty input) — not a correctness fix.
+        history_table = f'{table_name}_history'
+        append_history(conn, cleaned, 'silver_ibis', history_table)
+        ensure_current_table(conn, 'silver_ibis', history_table, table_name, 'uniqueid')
         if not cleaned.empty:
-            history_table = f'{table_name}_history'
-            append_history(conn, cleaned, 'silver_ibis', history_table)
-            ensure_current_table(conn, 'silver_ibis', history_table, table_name, 'uniqueid')
             upsert_latest(conn, cleaned, 'silver_ibis', table_name, 'uniqueid', 'extracted_at')
 
         # A run_uuid is only left unpromoted if its own country's processing
@@ -106,7 +117,22 @@ class BronzeToSilver(BaseStage):
         if bronze_df.empty:
             return 0, []
 
-        cleaned, errors, _failed_countries = clean_full_history(bronze_df, dedup_key, country_code_map)
+        cleaned, errors, failed_countries = clean_full_history(bronze_df, dedup_key, country_code_map)
+        if failed_countries:
+            # A partial rebuild is worse than no rebuild: if any country's
+            # cleaning raised, the resulting `cleaned` frame is missing that
+            # country's data entirely. Truncating+replacing the live table
+            # with it would silently and permanently wipe that country's
+            # data from production. Leave the existing (possibly stale, but
+            # complete) table untouched and surface the failure instead.
+            msg = (
+                f"--full-rebuild aborted for silver_ibis.{table_name}: cleaning failed "
+                f"for {sorted(failed_countries)}; refusing to truncate/replace the live "
+                f"table with incomplete data. Existing table left untouched. Errors: {errors}"
+            )
+            logger.error(msg)
+            errors.append(msg)
+            return 0, errors
         if cleaned.empty:
             return 0, errors
 
