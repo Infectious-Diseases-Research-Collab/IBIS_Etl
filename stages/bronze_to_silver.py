@@ -63,7 +63,7 @@ class BronzeToSilver(BaseStage):
         )
         logger.info(f"Read {len(bronze_df)} new row(s) from bronze_ibis.{table_name}.")
 
-        cleaned, errors = clean_full_history(bronze_df, dedup_key, country_code_map)
+        cleaned, errors, failed_countries = clean_full_history(bronze_df, dedup_key, country_code_map)
 
         if not cleaned.empty:
             history_table = f'{table_name}_history'
@@ -71,12 +71,28 @@ class BronzeToSilver(BaseStage):
             ensure_current_table(conn, 'silver_ibis', history_table, table_name, 'uniqueid')
             upsert_latest(conn, cleaned, 'silver_ibis', table_name, 'uniqueid', 'extracted_at')
 
-        conn.execute(text("""
-            UPDATE bronze_ibis.meta SET promoted_to_silver_at = now()
-            WHERE run_uuid = ANY(:uuids) AND table_name = :tn
-        """), {'uuids': run_uuids, 'tn': table_name})
+        # A run_uuid is only left unpromoted if its own country's processing
+        # actually raised — a run_uuid whose rows legitimately produced zero
+        # surviving rows (e.g. filtered out entirely) is still "done" and
+        # must be promoted, or it would be reprocessed forever. Leaving a
+        # genuinely-failed run_uuid unpromoted means it's retried on the
+        # next run instead of its data being silently lost forever.
+        if failed_countries:
+            failed_run_uuids = set(bronze_df.loc[bronze_df['country'].isin(failed_countries), 'run_uuid'])
+        else:
+            failed_run_uuids = set()
+        promoted_uuids = [u for u in run_uuids if u not in failed_run_uuids]
 
-        logger.info(f"Promoted {len(cleaned)} row(s) → silver_ibis.{table_name}.")
+        if promoted_uuids:
+            conn.execute(text("""
+                UPDATE bronze_ibis.meta SET promoted_to_silver_at = now()
+                WHERE run_uuid = ANY(:uuids) AND table_name = :tn
+            """), {'uuids': promoted_uuids, 'tn': table_name})
+
+        logger.info(
+            f"Promoted {len(cleaned)} row(s) → silver_ibis.{table_name} "
+            f"({len(promoted_uuids)}/{len(run_uuids)} file(s) marked done)."
+        )
         return len(cleaned), errors
 
     def _full_rebuild_table(
@@ -90,7 +106,7 @@ class BronzeToSilver(BaseStage):
         if bronze_df.empty:
             return 0, []
 
-        cleaned, errors = clean_full_history(bronze_df, dedup_key, country_code_map)
+        cleaned, errors, _failed_countries = clean_full_history(bronze_df, dedup_key, country_code_map)
         if cleaned.empty:
             return 0, errors
 

@@ -13,7 +13,7 @@ def clean_full_history(
     bronze_df: pd.DataFrame,
     dedup_key: str,
     country_code_map: dict[str, int],
-) -> tuple[pd.DataFrame, list[str]]:
+) -> tuple[pd.DataFrame, list[str], set]:
     """
     Clean and deduplicate a full (or partial) bronze DataFrame using the
     same per-country logic bronze_to_silver has always used: country-code
@@ -22,14 +22,23 @@ def clean_full_history(
     normal incremental path (on a new batch) and --full-rebuild /
     reconciliation (on all of bronze) can call it identically.
 
-    Returns (cleaned_df, errors); errors are per-country failures that
-    don't stop other countries from being processed (matches existing
-    bronze_to_silver behavior).
+    Returns (cleaned_df, errors, failed_countries). errors are per-country
+    failure messages that don't stop other countries from being processed
+    (matches existing bronze_to_silver behavior). failed_countries is the
+    set of `country` column values whose processing raised — callers MUST
+    check this before treating an input row as "processed": a country that
+    raised contributes zero rows to cleaned_df, which looks identical to a
+    country that legitimately filtered down to zero rows unless this set is
+    consulted. (This distinction matters because callers use "did this
+    input row make it into cleaned_df" to decide whether it's safe to mark
+    upstream state as done — see stages/bronze_to_silver.py's meta-promotion
+    logic in Task 4.)
     """
     if bronze_df.empty:
-        return bronze_df, []
+        return bronze_df, [], set()
 
     errors: list[str] = []
+    failed_countries: set = set()
     all_cleaned: list[pd.DataFrame] = []
 
     for country, group in bronze_df.groupby('country'):
@@ -42,7 +51,7 @@ def clean_full_history(
                 cleaner = DataCleaner(df)
             else:
                 logger.warning(
-                    f"[{country}] No country code configured; keeping rows unfiltered."
+                    f"[{country}] No country code configured; skipping country filter."
                 )
                 df = group.copy()
 
@@ -64,9 +73,10 @@ def clean_full_history(
             msg = f"[{country}] Failed during cleaning: {exc}"
             logger.error(msg)
             errors.append(msg)
+            failed_countries.add(country)
 
     if not all_cleaned:
-        return bronze_df.iloc[0:0], errors
+        return bronze_df.iloc[0:0], errors, failed_countries
 
     cleaned = pd.concat(all_cleaned, ignore_index=True)
-    return cleaned.drop(columns=['_source_db'], errors='ignore'), errors
+    return cleaned.drop(columns=['_source_db'], errors='ignore'), errors, failed_countries
