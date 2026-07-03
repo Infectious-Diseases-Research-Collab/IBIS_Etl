@@ -55,17 +55,33 @@ def test_clean_full_history_returns_empty_and_no_errors_for_empty_input():
 
 
 def test_clean_full_history_collects_per_country_errors_without_raising():
-    """A malformed group for one country must not prevent other countries
-    from being cleaned — matches today's per-country error tolerance."""
+    """A country with no entry in country_code_map must not be silently
+    dropped — it passes through unfiltered (with a warning) alongside
+    countries that do have a configured code, matching today's
+    bronze_to_silver behavior."""
     df = pd.DataFrame({
         'uniqueid': ['a', 'b'],
         'countrycode': ['not-a-number', 2],
         'country': ['broken', 'kenya'],
         'extracted_at': pd.to_datetime(['2026-01-01', '2026-01-01']),
     })
-    # country_code_map maps 'broken' to a non-numeric-safe value to force an error path;
-    # simplest reliable trigger: pass a dedup_key that doesn't exist for one group only
-    # is hard to construct column-wise, so instead assert the two supported outcomes:
+    # 'broken' has no entry in country_code_map, so its rows pass through
+    # unfiltered; 'kenya' is configured and matches countrycode 2.
     cleaned, errors = clean_full_history(df, dedup_key='uniqueid', country_code_map={'kenya': 2})
-    assert list(cleaned['uniqueid']) == ['b']  # 'broken' group's non-numeric code never matches 2, filtered out
+    assert sorted(cleaned['uniqueid']) == ['a', 'b']  # order depends on groupby iteration, not guaranteed
     assert errors == []
+
+
+def test_clean_full_history_keeps_unconfigured_country_rows_unfiltered():
+    """A country entirely absent from country_code_map must have all its
+    rows survive, unfiltered, with no error recorded."""
+    df = pd.DataFrame({
+        'uniqueid': ['x', 'y'],
+        'countrycode': [99, 100],
+        'country': ['unmapped', 'unmapped'],
+        'extracted_at': pd.to_datetime(['2026-01-01', '2026-01-02']),
+    })
+    cleaned, errors = clean_full_history(df, dedup_key='uniqueid', country_code_map={'kenya': 2})
+
+    assert errors == []
+    assert sorted(cleaned['uniqueid']) == ['x', 'y']

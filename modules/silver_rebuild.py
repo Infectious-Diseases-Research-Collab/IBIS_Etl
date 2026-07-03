@@ -42,9 +42,9 @@ def clean_full_history(
                 cleaner = DataCleaner(df)
             else:
                 logger.warning(
-                    f"[{country}] No country code configured; skipping country."
+                    f"[{country}] No country code configured; keeping rows unfiltered."
                 )
-                continue
+                df = group.copy()
 
             df = cleaner.drop_exact_duplicates()
             cleaner = DataCleaner(df)
