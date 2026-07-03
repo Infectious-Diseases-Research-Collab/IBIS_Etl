@@ -29,6 +29,21 @@ The orchestrator (`ibis.py`) uses a topological sort (Kahn's algorithm) to deriv
 
 ---
 
+## Incremental Processing & History Tracking
+
+`bronze_to_silver` processes only new bronze records each run. A `promoted_to_silver_at` timestamp in `bronze_ibis.meta` tracks which bronze records have been cleaned and moved to silver — unchanged records are never reprocessed.
+
+The `silver_ibis.<table>_history` tables retain every cleaned version of every record forever, enabling audit trails and point-in-time recovery without re-running expensive upstream transformations.
+
+To force a complete rebuild of `silver_ibis` from scratch (e.g., after correcting data in bronze), use:
+```bash
+docker compose run --rm etl python ibis.py -p bronze_to_silver --full-rebuild
+```
+
+The `ReconcileSilver` stage (described in the Architecture table above) runs weekly as a safety net, comparing the incrementally-maintained `silver_ibis` against a fresh rebuild to detect drift. For the full design rationale, see [Design Specification](docs/superpowers/specs/2026-07-03-incremental-silver-gold-design.md).
+
+---
+
 ## Prerequisites
 
 - [Docker](https://docs.docker.com/get-docker/) and Docker Compose
