@@ -173,3 +173,68 @@ def test_full_rebuild_bypasses_meta_filter_and_rewrites_current_table():
     assert all('_history' not in s for s in truncate_calls)
     assert any('TRUNCATE silver_ibis."baseline"' in s or 'TRUNCATE silver_ibis."followup"' in s
                for s in truncate_calls)
+
+
+def test_incremental_multi_batch_matches_full_rebuild():
+    """
+    Batch 1: uniqueid 'a' arrives with extracted_at=2026-01-01.
+    Batch 2: a correction to 'a' arrives with extracted_at=2026-01-05,
+    plus a brand-new record 'b'.
+    The incrementally-upserted current table's final state for 'a' and 'b'
+    must match what a single full-rebuild over both batches combined
+    would produce — i.e. 'a' must show the 2026-01-05 version, not 2026-01-01.
+    """
+    config = _make_config()
+
+    batch1 = pd.DataFrame({
+        'uniqueid': ['a'], 'countrycode': [2], 'country': ['kenya'],
+        'extracted_at': pd.to_datetime(['2026-01-01']), 'run_uuid': ['run-1'],
+        'value': ['old'],
+    })
+    batch2 = pd.DataFrame({
+        'uniqueid': ['a', 'b'], 'countrycode': [2, 2], 'country': ['kenya', 'kenya'],
+        'extracted_at': pd.to_datetime(['2026-01-05', '2026-01-05']), 'run_uuid': ['run-2', 'run-2'],
+        'value': ['corrected', 'new'],
+    })
+    combined = pd.concat([batch1, batch2], ignore_index=True)
+
+    upserted_state: dict[str, dict] = {}
+
+    def fake_upsert_latest(conn, df, schema, table, key_col, order_col):
+        for _, row in df.iterrows():
+            key = row[key_col]
+            existing = upserted_state.get(key)
+            if existing is None or row[order_col] > existing[order_col]:
+                upserted_state[key] = row.to_dict()
+
+    # --- run incrementally: batch 1, then batch 2 ---
+    engine1 = MagicMock()
+    conn1 = _make_conn_with_meta(['run-1'])
+    engine1.begin.return_value.__enter__ = MagicMock(return_value=conn1)
+    engine1.begin.return_value.__exit__ = MagicMock(return_value=False)
+    with patch('stages.bronze_to_silver.pd.read_sql',
+               side_effect=lambda *a, **kw: (batch1 if 'followup' not in str(a[0]) else batch1.iloc[0:0])), \
+         patch('stages.bronze_to_silver.append_history'), \
+         patch('stages.bronze_to_silver.ensure_current_table'), \
+         patch('stages.bronze_to_silver.upsert_latest', side_effect=fake_upsert_latest):
+        BronzeToSilver(config=config, engine=engine1).run()
+
+    engine2 = MagicMock()
+    conn2 = _make_conn_with_meta(['run-2'])
+    engine2.begin.return_value.__enter__ = MagicMock(return_value=conn2)
+    engine2.begin.return_value.__exit__ = MagicMock(return_value=False)
+    with patch('stages.bronze_to_silver.pd.read_sql',
+               side_effect=lambda *a, **kw: (batch2 if 'followup' not in str(a[0]) else batch2.iloc[0:0])), \
+         patch('stages.bronze_to_silver.append_history'), \
+         patch('stages.bronze_to_silver.ensure_current_table'), \
+         patch('stages.bronze_to_silver.upsert_latest', side_effect=fake_upsert_latest):
+        BronzeToSilver(config=config, engine=engine2).run()
+
+    incremental_final = {k: v['value'] for k, v in upserted_state.items()}
+
+    # --- run a full rebuild over both batches combined ---
+    from modules.silver_rebuild import clean_full_history
+    rebuilt, _, _ = clean_full_history(combined, dedup_key='uniqueid', country_code_map={'kenya': 2})
+    full_rebuild_final = dict(zip(rebuilt['uniqueid'], rebuilt['value']))
+
+    assert incremental_final == full_rebuild_final == {'a': 'corrected', 'b': 'new'}
