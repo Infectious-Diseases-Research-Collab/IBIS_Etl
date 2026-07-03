@@ -43,9 +43,12 @@ Usage
 import logging
 import os
 import re
+from dataclasses import dataclass
 from typing import Optional
 
 import pandas as pd
+
+from modules import reference_data
 
 # rapidfuzz / numpy are optional-at-import-time: spawned subprocesses created
 # by access_reader re-import this module but may not have these packages on
@@ -64,6 +67,24 @@ logger = logging.getLogger(__name__)
 _SYSTEM_SKIP = -9
 # -7 is the "don't know" response code.
 _DONT_KNOW = -7
+
+
+@dataclass(frozen=True)
+class _CheckSpec:
+    """
+    One entry in DataValidator._CHECKS.
+
+    validate() resolves *method_name* via getattr() and calls it with the
+    arguments the flags below select. Adding check #25 means adding one
+    _check_<name> method plus one _CheckSpec here — validate() itself never
+    needs to change, unlike the previous version where every new check was
+    another hand-written `issues += self._check_x(df)` call site to keep in
+    sync with the skip_identity/country_code gating logic.
+    """
+    method_name: str
+    needs_country_code: bool = False  # call as method(df, country_code, country_name); skipped if country_code is None
+    needs_country_name: bool = False  # call as method(df, country_name)
+    identity: bool = False            # skipped when skip_identity=True
 
 
 class DataValidator:
@@ -91,25 +112,57 @@ class DataValidator:
     # Valid format for a screening ID: alphanumeric, hyphens, underscores only.
     _SCREENING_ID_RE = re.compile(r'^[A-Za-z0-9_\-]+$')
 
-    # Health facility code → label mappings (from the data dictionary).
-    _FACILITY_CODES_KE: dict[int, str] = {
-        21: 'Homa Bay Teaching and Referral Hospital',
-        22: 'Rachuonyo District Hospital',
-        23: 'Suba District Hospital',
-        24: 'Ndhiwa District Hospital',
-        99: 'Other',
-    }
-    _FACILITY_CODES_UG: dict[int, str] = {
-        11: 'Bushenyi HCIV',
-        12: 'Ishaka Adventist Hospital (Bushenyi)',
-        13: 'Ishongororo HCIV (Ibanda)',
-        14: 'Ruhoko HCIV (Ibanda)',
-        99: 'Other',
-    }
+    # Health facility code → label mappings. Sourced from modules.reference_data
+    # (the single source of truth) rather than defined here — see that module's
+    # docstring for why.
+    _FACILITY_CODES_KE: dict[int, str] = reference_data.FACILITY_CODES_KE
+    _FACILITY_CODES_UG: dict[int, str] = reference_data.FACILITY_CODES_UG
 
     # Columns excluded from sparse_column check — known to be intentionally empty
     # (e.g. vdate mirrors starttime and is never independently populated).
     _COMPLETENESS_EXCLUDE: set[str] = {'vdate', 'age'}
+
+    # Every check validate() runs, in order. See _CheckSpec's docstring.
+    _CHECKS: tuple[_CheckSpec, ...] = (
+        _CheckSpec('_check_required_fields'),
+        _CheckSpec('_check_age'),
+        _CheckSpec('_check_cross_country_fields'),
+        _CheckSpec('_check_health_facility_codes'),
+        _CheckSpec('_check_duplicate_uniqueid'),
+        _CheckSpec('_check_duplicate_screening_id'),
+        _CheckSpec('_check_consent_without_subjid'),
+        _CheckSpec('_check_missing_interviewer_id'),
+        _CheckSpec('_check_countrycode_mismatch', needs_country_code=True),
+        # Duplicate / related participant identity checks — skipped at
+        # per-facility level when a country-level pass handles them instead.
+        _CheckSpec('_check_duplicate_subjid', identity=True),
+        _CheckSpec('_check_duplicate_phone', identity=True),
+        _CheckSpec('_check_similar_phones', identity=True),
+        _CheckSpec('_check_duplicate_name', identity=True),
+        _CheckSpec('_check_similar_names', identity=True),
+        # Temporal and logical checks
+        _CheckSpec('_check_interview_duration'),
+        _CheckSpec('_check_dob_age_consistency'),
+        _CheckSpec('_check_visit_date'),
+        _CheckSpec('_check_appointment_dates'),
+        # Coding / consent integrity checks
+        _CheckSpec('_check_consent_flow'),
+        _CheckSpec('_check_client_sex'),
+        # Operational signal checks
+        _CheckSpec('_check_interviewer_productivity'),
+        _CheckSpec('_check_screening_id_format', needs_country_name=True),
+        _CheckSpec('_check_tablet_record_counts'),
+        _CheckSpec('_check_record_completeness'),
+    )
+
+    # Check names produced exclusively by the identity=True checks above —
+    # the single source of truth for filtering a combined report down to just
+    # identity issues (used by measures_ibis.py's country-level pass), so
+    # that set doesn't have to be hand-maintained separately from _CHECKS.
+    IDENTITY_CHECK_NAMES = frozenset({
+        'duplicate_subjid', 'duplicate_phone', 'similar_phone',
+        'duplicate_name', 'similar_name',
+    })
 
     def __init__(self, system_skip_code: int = _SYSTEM_SKIP):
         self.skip_code = system_skip_code
@@ -143,41 +196,19 @@ class DataValidator:
         """
         issues: list[dict] = []
 
-        issues += self._check_required_fields(df)
-        issues += self._check_age(df)
-        issues += self._check_cross_country_fields(df)
-        issues += self._check_health_facility_codes(df)
-        issues += self._check_duplicate_uniqueid(df)
-        issues += self._check_duplicate_screening_id(df)
-        issues += self._check_consent_without_subjid(df)
-        issues += self._check_missing_interviewer_id(df)
-        if country_code is not None:
-            issues += self._check_countrycode_mismatch(df, country_code, country_name)
+        for spec in self._CHECKS:
+            if spec.identity and skip_identity:
+                continue
+            if spec.needs_country_code and country_code is None:
+                continue
 
-        # Duplicate / related participant identity checks
-        # (skipped at per-facility level when a country-level pass handles them)
-        if not skip_identity:
-            issues += self._check_duplicate_subjid(df)
-            issues += self._check_duplicate_phone(df)
-            issues += self._check_similar_phones(df)
-            issues += self._check_duplicate_name(df)
-            issues += self._check_similar_names(df)
-
-        # Temporal and logical checks
-        issues += self._check_interview_duration(df)
-        issues += self._check_dob_age_consistency(df)
-        issues += self._check_visit_date(df)
-        issues += self._check_appointment_dates(df)
-
-        # Coding / consent integrity checks
-        issues += self._check_consent_flow(df)
-        issues += self._check_client_sex(df)
-
-        # Operational signal checks
-        issues += self._check_interviewer_productivity(df)
-        issues += self._check_screening_id_format(df, country_name)
-        issues += self._check_tablet_record_counts(df)
-        issues += self._check_record_completeness(df)
+            method = getattr(self, spec.method_name)
+            if spec.needs_country_code:
+                issues += method(df, country_code, country_name)
+            elif spec.needs_country_name:
+                issues += method(df, country_name)
+            else:
+                issues += method(df)
 
         for issue in issues:
             issue.setdefault('country', country_name)
@@ -664,11 +695,58 @@ class DataValidator:
             affected_tablets=self._tablets_for_mask(df, normalised[dup_mask].index),
         )]
 
+    @staticmethod
+    def _one_digit_diff_pairs(
+        phones: list[str], indices: list
+    ) -> list[tuple[object, object, str, str]]:
+        """
+        Return (idx_a, idx_b, phone_a, phone_b) for every pair in *phones*
+        (assumed all the same length) that differ in exactly one digit
+        position, without comparing every pair directly.
+
+        Blocks candidates by masking out one digit position at a time: two
+        numbers that differ in exactly one position become IDENTICAL once
+        that position is removed, so they are guaranteed to land in the same
+        bucket for that position (and, since they still disagree everywhere
+        else, no other position's bucket). This turns what was an O(n^2)
+        comparison of every pair — fine at hundreds of records, unusable at
+        tens of thousands — into O(n * length) bucket insertions plus a much
+        smaller number of pairwise confirmations inside each bucket. Because
+        every true match is guaranteed to share a bucket, this changes
+        nothing about which pairs are found, only how many comparisons it
+        takes to find them.
+        """
+        if len(phones) < 2:
+            return []
+        length = len(phones[0])
+
+        buckets: dict[tuple[int, str], list[int]] = {}
+        for pos, phone in enumerate(phones):
+            for digit_pos in range(length):
+                key = (digit_pos, phone[:digit_pos] + phone[digit_pos + 1:])
+                buckets.setdefault(key, []).append(pos)
+
+        seen_pairs: set[tuple[int, int]] = set()
+        results: list[tuple[object, object, str, str]] = []
+        for members in buckets.values():
+            if len(members) < 2:
+                continue
+            for a in range(len(members)):
+                for b in range(a + 1, len(members)):
+                    i, j = members[a], members[b]
+                    pair_key = (i, j) if i < j else (j, i)
+                    if pair_key in seen_pairs:
+                        continue
+                    seen_pairs.add(pair_key)
+                    pi, pj = phones[i], phones[j]
+                    if sum(ca != cb for ca, cb in zip(pi, pj)) == 1:
+                        results.append((indices[i], indices[j], pi, pj))
+        return results
+
     def _check_similar_phones(self, df: pd.DataFrame) -> list[dict]:
         """
         Flag pairs of same-length mobile numbers that differ by exactly one digit
         — the most common signature of a transposition or single-digit typo.
-        Uses numpy vectorisation when available; falls back to a Python loop.
         """
         if self._PHONE_FIELD not in df.columns:
             return []
@@ -697,24 +775,10 @@ class DataValidator:
                 continue
             grp_phones = [p for p, _ in grp]
             grp_indices = [i for _, i in grp]
-            if _RAPIDFUZZ_AVAILABLE:
-                m = np.frombuffer(''.join(grp_phones).encode(), dtype=np.uint8).reshape(
-                    len(grp_phones), len(grp_phones[0])
-                )
-                rows, cols = np.triu_indices(len(grp_phones), k=1)
-                one_off = (m[rows] != m[cols]).sum(axis=1) == 1
-                pair_count += int(one_off.sum())
-                for r, c in zip(rows[one_off].tolist(), cols[one_off].tolist()):
-                    affected_idx.extend([grp_indices[r], grp_indices[c]])
-                    phone_pairs.append((grp_phones[r], grp_phones[c]))
-            else:
-                for i in range(len(grp_phones)):
-                    for j in range(i + 1, len(grp_phones)):
-                        a, b = grp_phones[i], grp_phones[j]
-                        if sum(ca != cb for ca, cb in zip(a, b)) == 1:
-                            pair_count += 1
-                            affected_idx.extend([grp_indices[i], grp_indices[j]])
-                            phone_pairs.append((a, b))
+            for idx_a, idx_b, pa, pb in self._one_digit_diff_pairs(grp_phones, grp_indices):
+                pair_count += 1
+                affected_idx.extend([idx_a, idx_b])
+                phone_pairs.append((pa, pb))
 
         if not pair_count:
             return []
@@ -779,21 +843,15 @@ class DataValidator:
             ))
         return issues
 
-    def _check_similar_names(self, df: pd.DataFrame) -> list[dict]:
+    def _similar_name_pairs_full_scan(
+        self, norm: pd.Series
+    ) -> list[tuple[str, str, object, object, float]]:
         """
-        Flag pairs of names that are highly similar but not identical AND share
-        the same date of birth — the combination strongly indicates the same
-        person enrolled twice with a name spelling variation.
-        Uses rapidfuzz.process.cdist for vectorised pairwise scoring.
+        Full O(n^2) rapidfuzz/difflib comparison of every pair in *norm*.
+        Used directly when there's no dob column to block by, and internally
+        (on small per-DOB groups) when there is — see
+        _similar_name_pairs_blocked_by_dob.
         """
-        if self._NAME_FIELD not in df.columns:
-            return []
-        raw = df[self._NAME_FIELD].dropna()
-        raw = raw[raw.astype(str).str.strip() != '']
-        if len(raw) < 2:
-            return []
-
-        norm = raw.astype(str).str.strip().str.lower()
         names = norm.tolist()
         indices = norm.index.tolist()
 
@@ -807,23 +865,64 @@ class DataValidator:
             pair_scores = scores[rows, cols]
             # < 100 excludes exact matches (handled by _check_duplicate_name)
             above = (pair_scores >= threshold) & (pair_scores < 100)
-            pairs = [
+            return [
                 (names[r], names[c], indices[r], indices[c], s / 100)
                 for r, c, s in zip(rows[above].tolist(), cols[above].tolist(), pair_scores[above].tolist())
             ]
-        else:
-            pairs = []
-            threshold = self._NAME_SIMILARITY_THRESHOLD
-            for i in range(len(names)):
-                for j in range(i + 1, len(names)):
-                    if names[i] == names[j]:
-                        continue
-                    ratio = _difflib.SequenceMatcher(None, names[i], names[j]).ratio()
-                    if ratio >= threshold:
-                        pairs.append((names[i], names[j], indices[i], indices[j], ratio))
 
-        if not pairs:
+        pairs = []
+        threshold = self._NAME_SIMILARITY_THRESHOLD
+        for i in range(len(names)):
+            for j in range(i + 1, len(names)):
+                if names[i] == names[j]:
+                    continue
+                ratio = _difflib.SequenceMatcher(None, names[i], names[j]).ratio()
+                if ratio >= threshold:
+                    pairs.append((names[i], names[j], indices[i], indices[j], ratio))
+        return pairs
+
+    def _similar_name_pairs_blocked_by_dob(
+        self, norm: pd.Series, dob_series: pd.Series
+    ) -> list[tuple[str, str, object, object, float]]:
+        """
+        Only compare names within an exact (normalised) shared date of
+        birth. A flagged similar-name pair always requires dob_a == dob_b
+        (checked again in _check_similar_names, harmlessly redundant here),
+        so grouping by DOB first is lossless — and turns what was one
+        O(n^2) rapidfuzz.cdist call over the whole country into many tiny
+        per-DOB comparisons, since real DOB groups are almost always a
+        handful of people at most. This is the difference between "fine at
+        hundreds of records" and "computing a similarity matrix with
+        billions of cells" once enrollment reaches tens of thousands.
+        """
+        by_dob: dict = {}
+        for idx in norm.index:
+            dob = dob_series.get(idx)
+            if pd.isna(dob):
+                continue
+            by_dob.setdefault(dob, []).append(idx)
+
+        pairs: list[tuple[str, str, object, object, float]] = []
+        for group_indices in by_dob.values():
+            if len(group_indices) < 2:
+                continue
+            pairs.extend(self._similar_name_pairs_full_scan(norm.loc[group_indices]))
+        return pairs
+
+    def _check_similar_names(self, df: pd.DataFrame) -> list[dict]:
+        """
+        Flag pairs of names that are highly similar but not identical AND share
+        the same date of birth — the combination strongly indicates the same
+        person enrolled twice with a name spelling variation.
+        """
+        if self._NAME_FIELD not in df.columns:
             return []
+        raw = df[self._NAME_FIELD].dropna()
+        raw = raw[raw.astype(str).str.strip() != '']
+        if len(raw) < 2:
+            return []
+
+        norm = raw.astype(str).str.strip().str.lower()
 
         has_dob = 'dob' in df.columns
         has_tablet = 'tabletnum' in df.columns
@@ -832,8 +931,13 @@ class DataValidator:
         # filter pairs to those where both records share the same DOB.
         if has_dob:
             dob_series = self._parse_dob(df['dob']).dt.normalize()
+            pairs = self._similar_name_pairs_blocked_by_dob(norm, dob_series)
         else:
             dob_series = None
+            pairs = self._similar_name_pairs_full_scan(norm)
+
+        if not pairs:
+            return []
 
         # Sort by similarity descending so highest-risk pairs appear first
         pairs.sort(key=lambda x: x[4], reverse=True)

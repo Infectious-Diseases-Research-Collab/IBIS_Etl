@@ -58,6 +58,62 @@ def test_measures_ibis_writes_validator_report(monkeypatch):
     assert 'gold_ibis.ds_validation_report' in written
 
 
+def test_measures_ibis_reports_formatted_error_on_sql_failure():
+    """
+    A SQL error while running sql/measures/*.sql must produce the formatted
+    "SQL error in '<file>'" message in result.errors (and still report
+    rows_written for the validation report already written) — not be
+    silently discarded by the collect-then-raise pattern this replaced.
+    """
+    silver_df = pd.DataFrame({
+        'uniqueid': ['a'],
+        'countrycode': [2],
+        'tabletnum': [221],
+        'screening_id': ['KE001'],
+        'starttime': [None],
+        'stoptime': [None],
+        'client_sex': [1],
+        'health_facility': ['HF1'],
+        'country': ['kenya'],
+    })
+    report_df = pd.DataFrame([{
+        'check': 'missing_required', 'severity': 'WARNING', 'field': 'starttime',
+        'record_count': 1, 'detail': 'starttime missing', 'affected_subjids': '',
+    }])
+
+    engine = MagicMock()
+    mock_conn = MagicMock()
+    mock_conn.execute.side_effect = Exception('relation does not exist')
+    engine.begin.return_value.__enter__ = MagicMock(return_value=mock_conn)
+    engine.begin.return_value.__exit__ = MagicMock(return_value=False)
+
+    config = MagicMock()
+    config.get.side_effect = lambda key, default=None: {
+        'trial': {'country_code_map': {'kenya': 2}},
+    }.get(key, default)
+
+    def fake_to_sql(df_self, name, eng=None, schema=None, if_exists='append', index=True):
+        pass
+
+    mock_sql_path = MagicMock()
+    mock_sql_path.read_text.return_value = 'SELECT 1;'
+    mock_sql_path.name = 'qc_checks.sql'
+
+    with patch('pandas.DataFrame.to_sql', fake_to_sql):
+        with patch('stages.measures_ibis.pd.read_sql', return_value=silver_df):
+            with patch('stages.measures_ibis.DataValidator') as MockValidator:
+                MockValidator.return_value.validate.return_value = report_df
+                with patch('stages.measures_ibis._load_sql_files', return_value=[mock_sql_path]):
+                    stage = MeasuresIbis(config=config, engine=engine)
+                    result = stage.run()
+
+    assert not result.success
+    assert result.rows_written == len(report_df)
+    assert len(result.errors) == 1
+    assert "SQL error in 'qc_checks.sql'" in result.errors[0]
+    assert 'relation does not exist' in result.errors[0]
+
+
 def test_measures_ibis_warns_on_missing_country_code():
     """When a country has no entry in country_code_map, a warning is logged and validation continues."""
     silver_df = pd.DataFrame({

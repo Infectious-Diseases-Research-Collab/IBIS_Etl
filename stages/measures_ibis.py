@@ -7,6 +7,7 @@ from pathlib import Path
 import pandas as pd
 from sqlalchemy import text
 
+from modules import reference_data
 from modules.data_validator import DataValidator
 from stages.base import BaseStage, StageResult
 
@@ -16,8 +17,8 @@ SQL_MEASURES_DIR = os.path.join(os.path.dirname(__file__), '..', 'sql', 'measure
 
 # Country name → (facility column, code→name map)
 _FACILITY_CONFIG: dict[str, tuple[str, dict]] = {
-    'kenya':  ('health_facility_ke', DataValidator._FACILITY_CODES_KE),
-    'uganda': ('health_facility_ug', DataValidator._FACILITY_CODES_UG),
+    'kenya':  ('health_facility_ke', reference_data.FACILITY_CODES_KE),
+    'uganda': ('health_facility_ug', reference_data.FACILITY_CODES_UG),
 }
 
 
@@ -74,11 +75,9 @@ class MeasuresIbis(BaseStage):
                     skip_identity=False,
                 )
                 # Keep only the identity-check rows to avoid duplicating other checks.
-                _IDENTITY_CHECKS = {
-                    'duplicate_subjid', 'duplicate_phone', 'similar_phone',
-                    'duplicate_name', 'similar_name',
-                }
-                id_report = id_report[id_report['check'].isin(_IDENTITY_CHECKS)]
+                # DataValidator.IDENTITY_CHECK_NAMES is the single source of
+                # truth for which check names these are (see its _CHECKS registry).
+                id_report = id_report[id_report['check'].isin(DataValidator.IDENTITY_CHECK_NAMES)]
                 if not id_report.empty:
                     all_reports.append(id_report)
             except Exception as exc:
@@ -139,16 +138,25 @@ class MeasuresIbis(BaseStage):
             logger.error(msg)
             errors.append(msg)
             return StageResult(success=False, rows_written=len(full_report), errors=errors)
-        with self.engine.begin() as conn:
-            for sql_path in sql_files:
-                sql = sql_path.read_text()
-                try:
-                    conn.execute(text(sql))
-                    logger.info(f"Executed: {sql_path.name}")
-                except Exception as exc:
-                    msg = f"SQL error in '{sql_path.name}': {exc}"
-                    logger.error(msg)
-                    errors.append(msg)
-                    raise
+        # See transform_ibis.py for why this is try/except-wrapped rather
+        # than left to propagate: the inner raise aborts the transaction on
+        # the first failing file, and the outer except gets back to the
+        # return below with *errors* (and rows_written) populated instead of
+        # losing that detail to a bare caught-and-rewrapped exception upstream.
+        try:
+            with self.engine.begin() as conn:
+                for sql_path in sql_files:
+                    try:
+                        sql = sql_path.read_text()
+                        conn.execute(text(sql))
+                        logger.info(f"Executed: {sql_path.name}")
+                    except Exception as exc:
+                        msg = f"SQL error in '{sql_path.name}': {exc}"
+                        logger.error(msg)
+                        errors.append(msg)
+                        raise
+        except Exception as exc:
+            if not errors:
+                errors.append(str(exc))
 
         return StageResult(success=len(errors) == 0, rows_written=len(full_report), errors=errors)
