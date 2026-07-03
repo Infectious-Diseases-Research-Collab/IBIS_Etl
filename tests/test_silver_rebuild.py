@@ -1,5 +1,8 @@
+from unittest.mock import patch
+
 import pandas as pd
 
+from modules.data_cleaner import DataCleaner
 from modules.silver_rebuild import clean_full_history
 
 
@@ -85,3 +88,24 @@ def test_clean_full_history_keeps_unconfigured_country_rows_unfiltered():
 
     assert errors == []
     assert sorted(cleaned['uniqueid']) == ['x', 'y']
+
+
+def test_clean_full_history_returns_empty_with_errors_when_all_groups_raise():
+    """If every per-country group raises during cleaning, all_cleaned stays
+    empty and the function must fall through to the empty-result path:
+    an empty DataFrame (same columns as input) plus one error message per
+    country describing the failure."""
+    df = pd.DataFrame({
+        'uniqueid': ['a', 'b'],
+        'countrycode': [2, 2],
+        'country': ['kenya', 'kenya'],
+        'extracted_at': pd.to_datetime(['2026-01-01', '2026-01-02']),
+    })
+
+    with patch.object(DataCleaner, 'drop_exact_duplicates', side_effect=RuntimeError('boom')):
+        cleaned, errors = clean_full_history(df, dedup_key='uniqueid', country_code_map={'kenya': 2})
+
+    assert cleaned.empty
+    assert list(cleaned.columns) == list(df.columns)
+    assert len(errors) == 1
+    assert errors[0] == '[kenya] Failed during cleaning: boom'
