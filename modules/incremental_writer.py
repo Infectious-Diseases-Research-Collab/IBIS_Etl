@@ -1,11 +1,19 @@
 from __future__ import annotations
 
 import logging
+import re
 
 import pandas as pd
 from sqlalchemy import text
 
 logger = logging.getLogger(__name__)
+
+
+def _validate_table_name(name: str) -> str:
+    """Reject names that could break SQL identifier quoting."""
+    if not re.match(r'^[a-z_][a-z0-9_]*$', name):
+        raise ValueError(f"Invalid table name: '{name}'")
+    return name
 
 
 def append_history(conn, df: pd.DataFrame, schema: str, history_table: str) -> None:
@@ -16,6 +24,9 @@ def append_history(conn, df: pd.DataFrame, schema: str, history_table: str) -> N
     table is the permanent record of every cleaned version of every record
     ever seen, and no other function in this module writes to it.
     """
+    _validate_table_name(schema)
+    _validate_table_name(history_table)
+
     df.to_sql(history_table, conn, schema=schema, if_exists='append', index=False)
     logger.info(f"Appended {len(df)} row(s) to {schema}.{history_table}.")
 
@@ -30,6 +41,11 @@ def ensure_current_table(
     and a UNIQUE(key_col) constraint. Both are required by upsert_latest().
     Idempotent — safe to call on every run.
     """
+    _validate_table_name(schema)
+    _validate_table_name(history_table)
+    _validate_table_name(current_table)
+    _validate_table_name(key_col)
+
     conn.execute(text(
         f'CREATE TABLE IF NOT EXISTS {schema}."{current_table}" '
         f'(LIKE {schema}."{history_table}" INCLUDING ALL)'
@@ -39,10 +55,13 @@ def ensure_current_table(
         f'ADD COLUMN IF NOT EXISTS updated_at TIMESTAMP NOT NULL DEFAULT now()'
     ))
     constraint_name = f'{current_table}_{key_col}_key'
-    exists = conn.execute(
-        text('SELECT 1 FROM pg_constraint WHERE conname = :name'),
-        {'name': constraint_name},
-    ).scalar()
+    exists = conn.execute(text("""
+        SELECT 1
+        FROM pg_constraint c
+        JOIN pg_class t ON t.oid = c.conrelid
+        JOIN pg_namespace n ON n.oid = t.relnamespace
+        WHERE c.conname = :name AND n.nspname = :schema
+    """), {'name': constraint_name, 'schema': schema}).scalar()
     if not exists:
         conn.execute(text(
             f'ALTER TABLE {schema}."{current_table}" '
@@ -70,10 +89,16 @@ def upsert_latest(
     "_new_<table>" / "_old_<table>" staging-table naming convention already
     used in stages/promote_ibis.py.
     """
+    _validate_table_name(schema)
+    _validate_table_name(current_table)
+    _validate_table_name(key_col)
+    _validate_table_name(order_col)
+
     if df.empty:
         return
 
     staging_table = f'_stage_{current_table}'
+    _validate_table_name(staging_table)
     df.to_sql(staging_table, conn, schema=schema, if_exists='replace', index=False)
 
     cols = list(df.columns)
