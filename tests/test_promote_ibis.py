@@ -4,15 +4,34 @@ from unittest.mock import MagicMock
 from stages.promote_ibis import PromoteIbis
 
 
+def _make_conn(tables, dep_views_by_table=None):
+    """A connection mock that returns different fetchall() results depending
+    on which query is being run — the real code issues two structurally
+    different SELECTs (table listing, dependent-view lookup) per stage run,
+    and a single fixed return_value can't represent both correctly."""
+    dep_views_by_table = dep_views_by_table or {}
+    conn = MagicMock()
+
+    def fake_execute(clause, params=None):
+        sql = str(clause)
+        result = MagicMock()
+        if 'information_schema.tables' in sql:
+            result.fetchall.return_value = [(t,) for t in tables]
+        elif 'pg_depend' in sql:
+            result.fetchall.return_value = dep_views_by_table.get((params or {}).get('table'), [])
+        else:
+            result.fetchall.return_value = []
+        return result
+
+    conn.execute.side_effect = fake_execute
+    return conn
+
+
 def test_promote_copies_all_gold_tables():
     engine = MagicMock()
-    mock_conn = MagicMock()
+    mock_conn = _make_conn(['d_participant', 'd_enrollment'])
     engine.begin.return_value.__enter__ = MagicMock(return_value=mock_conn)
     engine.begin.return_value.__exit__ = MagicMock(return_value=False)
-
-    mock_conn.execute.return_value.fetchall.return_value = [
-        ('d_participant',), ('d_enrollment',)
-    ]
 
     config = MagicMock()
     stage = PromoteIbis(config=config, engine=engine)
@@ -36,16 +55,54 @@ def test_promote_copies_all_gold_tables():
 
 
 def test_promote_rejects_invalid_table_name():
-    """Table names containing characters outside [a-z0-9_] must raise ValueError."""
+    """
+    A table name containing characters outside [a-z0-9_] must fail the stage
+    (surfaced as a StageResult error, not an uncaught exception — an
+    uncaught ValueError here would only be caught and re-stringified one
+    level up by ibis.py's generic handler, losing the fact that promotion
+    got partway through before failing).
+    """
     engine = MagicMock()
-    mock_conn = MagicMock()
+    mock_conn = _make_conn(['d_participant; DROP TABLE ibis.baseline--'])
     engine.begin.return_value.__enter__ = MagicMock(return_value=mock_conn)
     engine.begin.return_value.__exit__ = MagicMock(return_value=False)
 
-    mock_conn.execute.return_value.fetchall.return_value = [
-        ('d_participant; DROP TABLE ibis.baseline--',)
-    ]
+    stage = PromoteIbis(config=MagicMock(), engine=engine)
+    result = stage.run()
+
+    assert not result.success
+    assert any('Invalid table name' in e for e in result.errors)
+
+
+def test_promote_reports_formatted_error_not_bare_exception():
+    """A failure during promotion of one table must produce the formatted
+    "Failed to promote '<table>': ..." message in result.errors — not be
+    silently discarded by the collect-then-raise pattern this replaced."""
+    engine = MagicMock()
+    mock_conn = _make_conn(['d_participant'])
+    mock_conn.execute.side_effect = None  # override the fixture's side_effect
+    call_count = {'n': 0}
+
+    def flaky_execute(clause, params=None):
+        sql = str(clause)
+        result = MagicMock()
+        if 'information_schema.tables' in sql:
+            result.fetchall.return_value = [('d_participant',)]
+        elif 'pg_depend' in sql:
+            result.fetchall.return_value = []
+        elif 'CREATE TABLE' in sql:
+            raise RuntimeError('disk full')
+        return result
+
+    mock_conn.execute.side_effect = flaky_execute
+    engine.begin.return_value.__enter__ = MagicMock(return_value=mock_conn)
+    engine.begin.return_value.__exit__ = MagicMock(return_value=False)
 
     stage = PromoteIbis(config=MagicMock(), engine=engine)
-    with pytest.raises(ValueError, match="Invalid table name"):
-        stage.run()
+    result = stage.run()
+
+    assert not result.success
+    assert result.rows_written == 1  # one table was discovered, even though it failed
+    assert len(result.errors) == 1
+    assert "Failed to promote 'd_participant'" in result.errors[0]
+    assert 'disk full' in result.errors[0]

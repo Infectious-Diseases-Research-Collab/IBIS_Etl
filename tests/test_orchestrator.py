@@ -106,6 +106,35 @@ def test_run_pipeline_calls_notifier_on_failure():
     assert call_kwargs['stages'] == ['mdb_to_bronze']
 
 
+def test_maybe_init_readonly_role_skips_when_not_configured():
+    from ibis import _maybe_init_readonly_role
+
+    config = MagicMock()
+    config.get.return_value = {}  # no readonly_password_secret_file
+    engine = MagicMock()
+
+    with patch('ibis.init_readonly_role') as mock_init:
+        _maybe_init_readonly_role(config, engine)
+
+    mock_init.assert_not_called()
+
+
+def test_maybe_init_readonly_role_reads_secret_and_provisions(tmp_path):
+    from ibis import _maybe_init_readonly_role
+
+    secret_file = tmp_path / 'readonly_password'
+    secret_file.write_text('s3cr3t\n')
+
+    config = MagicMock()
+    config.get.return_value = {'readonly_password_secret_file': str(secret_file)}
+    engine = MagicMock()
+
+    with patch('ibis.init_readonly_role') as mock_init:
+        _maybe_init_readonly_role(config, engine)
+
+    mock_init.assert_called_once_with(engine, 's3cr3t')
+
+
 def test_run_pipeline_calls_notifier_on_success():
     """send_pipeline_report is called even on a clean run (it decides internally)."""
     config = MagicMock()

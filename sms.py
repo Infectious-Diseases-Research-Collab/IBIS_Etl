@@ -15,15 +15,21 @@ import logging
 import sys
 
 from modules.config import ConfigLoader
-from modules.db import create_db_engine, init_schemas, init_sms_tables
+from modules.db import PipelineLockError, create_db_engine, init_schemas, init_sms_tables, pipeline_lock
 from modules.notifier import send_sms_weekly_report
 from modules.sms_processor import SmsProcessor
+from stages.fetch_dlr import FetchDlr
 
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s [%(levelname)s] %(name)s - %(message)s',
 )
 logger = logging.getLogger(__name__)
+
+# Separate from ibis.py's lock: SMS operations (sync/send/DLR poll/reports)
+# don't mutate the medallion schemas, but must be serialised against each
+# other so an overrunning cron invocation doesn't overlap the next one.
+SMS_LOCK_NAME = 'ibis_sms_pipeline'
 
 
 def init_db(engine) -> None:
@@ -40,6 +46,20 @@ def main() -> None:
     parser.add_argument('--init-db',         action='store_true', help='Create SMS tables (run once at setup)')
     parser.add_argument('--check-delivery',  action='store_true',
                         help='Poll Blasta DLR for all unconfirmed sent messages')
+    parser.add_argument('--resend', action='store_true',
+                        help='Reset flagged/failed messages to pending so the next run '
+                             'resends them. Audited (logged to sms.resend_log) — requires '
+                             '--subjid, --week, and --actor.')
+    parser.add_argument('--subjid', nargs='+', metavar='SUBJID',
+                        help='Subject ID(s) to resend (used with --resend)')
+    parser.add_argument('--week', type=int,
+                        help='Week number of the messages to resend (used with --resend)')
+    parser.add_argument('--actor',
+                        help='Name or email of the person requesting the resend '
+                             '(used with --resend; recorded in the audit log)')
+    parser.add_argument('--note',
+                        help='Optional note explaining the resend, e.g. "confirmed '
+                             'number by phone" (used with --resend)')
     parser.add_argument('-v', '--verbose',   action='store_true')
     args = parser.parse_args()
 
@@ -48,25 +68,60 @@ def main() -> None:
 
     config = ConfigLoader('config.json')
     engine = create_db_engine(config)
+
+    try:
+        with pipeline_lock(engine, SMS_LOCK_NAME):
+            _run(args, config, engine)
+    except PipelineLockError as exc:
+        logger.error(str(exc))
+        sys.exit(1)
+
+
+def _run(args, config, engine) -> None:
     init_schemas(engine)  # ensures sms schema exists
 
     if args.init_db:
         init_db(engine)
         return
 
-    if args.check_delivery:
-        from modules.notifier import send_sms_flagged_alert
+    if args.resend:
+        missing = [
+            name for name, val in
+            [('--subjid', args.subjid), ('--week', args.week), ('--actor', args.actor)]
+            if not val
+        ]
+        if missing:
+            logger.error('--resend requires %s', ', '.join(missing))
+            sys.exit(1)
         processor = SmsProcessor(config=config, engine=engine)
-        dlr = processor.fetch_delivery_statuses()
+        updated = processor.resend(
+            args.subjid, args.week, actor=args.actor, note=args.note
+        )
+        note_suffix = f' — note: {args.note}' if args.note else ''
+        logger.info(
+            "Resend by %s: %d queue row(s) reset to pending "
+            "(week=%d, subjids=%s)%s",
+            args.actor, updated, args.week, args.subjid, note_suffix,
+        )
+        return
+
+    if args.check_delivery:
+        # Delegates to the FetchDlr stage rather than duplicating its logic
+        # here: FetchDlr also encodes the "fail only when every checked row
+        # errored" success rule, which this branch previously didn't apply —
+        # it always returned 0, so a fully-failed DLR poll would never be
+        # visible via the cron job's exit code.
+        stage = FetchDlr(config=config, engine=engine)
+        result = stage.run()
+        meta = result.metadata
         logger.info(
             'DLR check complete: checked=%d updated=%d pending=%d errors=%d',
-            dlr.checked, dlr.updated, dlr.pending, len(dlr.errors),
+            meta.get('checked', 0), meta.get('updated', 0),
+            meta.get('pending', 0), len(meta.get('errors', [])),
         )
-        flagged = processor.get_flagged_messages()
-        if flagged:
-            send_sms_flagged_alert(flagged, config, engine)
-            logger.info('%d message(s) flagged — alert sent to data manager.', len(flagged))
-        return
+        if meta.get('flagged'):
+            logger.info('%d message(s) flagged — alert sent to data manager.', meta['flagged'])
+        sys.exit(0 if result.success else 1)
 
     if args.weekly_report:
         send_sms_weekly_report(engine, config)

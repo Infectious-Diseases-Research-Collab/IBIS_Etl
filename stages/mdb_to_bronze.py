@@ -18,6 +18,26 @@ from stages.base import BaseStage, StageResult
 logger = logging.getLogger(__name__)
 
 
+def _quarantine_tablet(tablet_folder: str, extract_path: str) -> str:
+    """
+    Move a tablet folder that failed ingestion into Quarantine/, guaranteeing
+    the move succeeds even if a folder with the same name is already there
+    (e.g. the archive was re-extracted after a prior quarantine). Without
+    this, a colliding shutil.move raises, the caller's except-block only logs
+    a warning, and the corrupt folder is left in place — where it gets picked
+    up by the next glob() and fails identically on every subsequent run.
+    Returns the destination path actually used.
+    """
+    quarantine_dir = os.path.join(extract_path, 'Quarantine')
+    os.makedirs(quarantine_dir, exist_ok=True)
+    dest = os.path.join(quarantine_dir, os.path.basename(tablet_folder))
+    if os.path.exists(dest):
+        stamp = datetime.now(timezone.utc).strftime('%Y%m%d%H%M%S')
+        dest = f'{dest}_{stamp}'
+    shutil.move(tablet_folder, dest)
+    return dest
+
+
 class MdbToBronze(BaseStage):
     name = 'mdb_to_bronze'
     dependencies: list[str] = ['ftp_to_extracted']
@@ -60,17 +80,23 @@ class MdbToBronze(BaseStage):
                     total_rows += n
                 except Exception as exc:
                     tablet_folder = os.path.dirname(db_path)
-                    quarantine_dir = os.path.join(extract_path, 'Quarantine')
-                    dest = os.path.join(quarantine_dir, os.path.basename(tablet_folder))
                     try:
-                        os.makedirs(quarantine_dir, exist_ok=True)
-                        shutil.move(tablet_folder, dest)
+                        dest = _quarantine_tablet(tablet_folder, extract_path)
+                        logger.warning(
+                            f"[{country}] Quarantined corrupt MDB "
+                            f"'{os.path.basename(db_path)}' → {dest}: {exc}"
+                        )
                     except Exception as move_exc:
-                        logger.warning(f"[{country}] Could not quarantine '{tablet_folder}': {move_exc}")
-                    logger.warning(
-                        f"[{country}] Quarantined corrupt MDB "
-                        f"'{os.path.basename(db_path)}' → {dest}: {exc}"
-                    )
+                        # Quarantine itself failing is not routine: the corrupt
+                        # file stays in the active tree and will be retried (and
+                        # fail again) on every future run — surface it as a
+                        # stage error, not just a log line nobody reads.
+                        msg = (
+                            f"[{country}] Could not quarantine '{tablet_folder}' "
+                            f"(original error: {exc}): {move_exc}"
+                        )
+                        logger.error(msg)
+                        errors.append(msg)
                     baseline_ok = False
 
                 if not baseline_ok:

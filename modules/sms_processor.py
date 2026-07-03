@@ -11,6 +11,8 @@ from cryptography.fernet import Fernet
 from sqlalchemy import text
 from sqlalchemy.engine import Engine
 
+from modules.utils import load_fernet_key
+
 logger = logging.getLogger(__name__)
 
 BLASTA_BASE_URL = "https://sms.dmarkmobile.com/v3/api"
@@ -38,11 +40,11 @@ _ARM_MAP: dict[str, str] = {
 # Credential loading (follows existing Fernet .ini/.key pattern)
 # ---------------------------------------------------------------------------
 
-def _load_blasta_creds(ini_path: str, key_path: str) -> tuple[str, str]:
-    """Load and decrypt BLASTA username and password from secrets files."""
-    with open(key_path, encoding='utf-8') as f:
-        key = f.read().strip().encode()
-    cipher = Fernet(key)
+def _load_blasta_creds(ini_path: str, key_path: str | None = None) -> tuple[str, str]:
+    """Load and decrypt BLASTA username and password from secrets files.
+    The Fernet key is read from IBIS_BLASTA_FERNET_KEY (preferred) or, as a
+    local-dev fallback, from key_path."""
+    cipher = Fernet(load_fernet_key('IBIS_BLASTA_FERNET_KEY', key_path))
 
     cfg: dict[str, str] = {}
     with open(ini_path, encoding='utf-8') as f:
@@ -214,7 +216,7 @@ class SmsProcessor:
         if self._client is None:
             sms_cfg = self._config.get('sms') or {}
             username, password = _load_blasta_creds(
-                sms_cfg['blasta_ini'], sms_cfg['blasta_key']
+                sms_cfg['blasta_ini'], sms_cfg.get('blasta_key')
             )
             self._client = BlastaClient(username, password, self._max_retries)
         return self._client
@@ -475,6 +477,36 @@ class SmsProcessor:
                 )
 
         return result
+
+    def resend(
+        self, subjids: list[str], week: int, *, actor: str, note: str | None = None
+    ) -> int:
+        """
+        Reset flagged/failed sms.queue rows for *subjids*/*week* back to
+        'pending' so the next run resends them, and record who requested it
+        (and why) in sms.resend_log. This is the audited alternative to
+        emailing a raw UPDATE statement for someone to run by hand, which
+        left no record of who actually resent a message or when.
+        Returns the number of queue rows updated.
+        """
+        with self._engine.begin() as conn:
+            result = conn.execute(text("""
+                UPDATE sms.queue SET status = 'pending'
+                WHERE subjid = ANY(:subjids) AND week = :week
+            """), {"subjids": list(subjids), "week": week})
+            updated = result.rowcount or 0
+
+            for subjid in subjids:
+                conn.execute(text("""
+                    INSERT INTO sms.resend_log (subjid, week, actor, note)
+                    VALUES (:subjid, :week, :actor, :note)
+                """), {"subjid": subjid, "week": week, "actor": actor, "note": note})
+
+        logger.info(
+            "Resend logged: actor=%s week=%d subjids=%s (%d queue row(s) updated)",
+            actor, week, subjids, updated,
+        )
+        return updated
 
     def get_flagged_messages(self) -> list[dict]:
         """

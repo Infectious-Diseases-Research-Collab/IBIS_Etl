@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import logging
 import os
+import zlib
+from contextlib import contextmanager
 from pathlib import Path
 
 from sqlalchemy import create_engine, text
@@ -10,6 +12,14 @@ from sqlalchemy.engine import Engine, URL
 logger = logging.getLogger(__name__)
 
 SCHEMAS = ['bronze_ibis', 'silver_ibis', 'gold_ibis', 'ibis', 'store_ibis', 'sms']
+
+# A read-only role for reporting/dashboard tools, so they don't need the same
+# DDL/write privileges as the ETL's own connection. See init_readonly_role().
+READONLY_ROLE = 'ibis_readonly'
+
+
+class PipelineLockError(RuntimeError):
+    """Raised when a pipeline advisory lock is already held by another run."""
 
 
 def create_db_engine(config) -> Engine:
@@ -64,3 +74,92 @@ def init_sms_tables(engine: Engine) -> None:
     with engine.begin() as conn:
         conn.execute(text(sql_path.read_text()))
     logger.debug('SMS tables ready.')
+
+
+def init_readonly_role(engine: Engine, password: str) -> None:
+    """
+    Create (or update the password of) a read-only Postgres role with SELECT
+    access to every medallion schema, plus SELECT on any table created in
+    those schemas from now on. Reporting/dashboard tools should connect as
+    this role instead of the ETL's own role, which otherwise is the only
+    credential available and carries full DDL/write privileges everywhere —
+    a least-privilege gap for anything that only ever needs to read.
+
+    Idempotent — safe to re-run on every pipeline start (e.g. after a
+    password rotation in the mounted secret file).
+    """
+    with engine.begin() as conn:
+        exists = conn.execute(
+            text('SELECT 1 FROM pg_roles WHERE rolname = :role'),
+            {'role': READONLY_ROLE},
+        ).scalar()
+        if exists:
+            conn.execute(
+                text(f'ALTER ROLE "{READONLY_ROLE}" WITH LOGIN PASSWORD :pw'),
+                {'pw': password},
+            )
+        else:
+            conn.execute(
+                text(f'CREATE ROLE "{READONLY_ROLE}" WITH LOGIN PASSWORD :pw'),
+                {'pw': password},
+            )
+
+        for schema in SCHEMAS:
+            conn.execute(text(f'GRANT USAGE ON SCHEMA {schema} TO "{READONLY_ROLE}"'))
+            conn.execute(text(
+                f'GRANT SELECT ON ALL TABLES IN SCHEMA {schema} TO "{READONLY_ROLE}"'
+            ))
+            # Applies to tables the connecting role (the ETL's own role)
+            # creates in this schema from now on, so newly promoted/snapshot
+            # tables don't need a manual re-grant on every pipeline run.
+            conn.execute(text(
+                f'ALTER DEFAULT PRIVILEGES IN SCHEMA {schema} '
+                f'GRANT SELECT ON TABLES TO "{READONLY_ROLE}"'
+            ))
+
+    logger.info("Read-only role '%s' ready with SELECT access to: %s", READONLY_ROLE, SCHEMAS)
+
+
+def _lock_key(lock_name: str) -> int:
+    """Deterministically map a lock name to a bigint for pg_advisory_lock.
+    Must not use Python's built-in hash() — it is randomised per-process."""
+    return zlib.crc32(lock_name.encode('utf-8'))
+
+
+@contextmanager
+def pipeline_lock(engine: Engine, lock_name: str):
+    """
+    Hold a Postgres session-level advisory lock named *lock_name* for the
+    duration of the block, so overlapping cron invocations of the same
+    pipeline (e.g. a run that overruns into the next scheduled window) can't
+    execute concurrently against the same schemas.
+
+    Uses pg_try_advisory_lock (non-blocking) rather than the blocking variant:
+    a second invocation should fail fast and be retried on the next schedule,
+    not queue up and pile on top of an already-slow run.
+
+    The lock is held on a dedicated connection for the life of the block and
+    is released automatically if the process dies (session-scoped), so a
+    crashed run can never leave the lock stuck.
+
+    Raises PipelineLockError if the lock is already held elsewhere.
+    """
+    key = _lock_key(lock_name)
+    conn = engine.connect()
+    try:
+        acquired = conn.execute(
+            text('SELECT pg_try_advisory_lock(:key)'), {'key': key}
+        ).scalar()
+        if not acquired:
+            raise PipelineLockError(
+                f"Could not acquire pipeline lock '{lock_name}' — "
+                f"another run already holds it."
+            )
+        logger.debug("Acquired pipeline lock '%s'.", lock_name)
+        try:
+            yield
+        finally:
+            conn.execute(text('SELECT pg_advisory_unlock(:key)'), {'key': key})
+            logger.debug("Released pipeline lock '%s'.", lock_name)
+    finally:
+        conn.close()

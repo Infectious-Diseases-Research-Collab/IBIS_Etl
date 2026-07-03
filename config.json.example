@@ -17,9 +17,7 @@
   },
   "keyfiles": {
     "ftp_cred_filename_IBIS": "secrets/IBIS_ftp.ini",
-    "ftp_key_file_IBIS": "secrets/IBIS_ftp.key",
-    "sevenz_cred_filename": "secrets/Sevenz.ini",
-    "sevenz_key_file": "secrets/Sevenz.key"
+    "sevenz_cred_filename": "secrets/Sevenz.ini"
   },
   "access_table_name": "baseline",
   "excluded_tablets": [],
@@ -60,15 +58,13 @@
     "notify_countries": ["country1", "country2"],
     "sms_dm_recipients": [],
     "keyfiles": {
-      "smtp_ini": "secrets/SMTP.ini",
-      "smtp_key": "secrets/SMTP.key"
+      "smtp_ini": "secrets/SMTP.ini"
     }
   },
   "sms": {
     "countrycode":  "1",
     "messages_dir": "data/sms_messages",
     "blasta_ini":   "secrets/BLASTA.ini",
-    "blasta_key":   "secrets/BLASTA.key",
     "max_retries":  3,
     "dry_run":      false
   }

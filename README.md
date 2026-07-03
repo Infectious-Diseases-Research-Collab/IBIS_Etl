@@ -44,26 +44,33 @@ mkdir -p secrets
 # Database password (used by postgres and the ETL app)
 echo 'your_db_password' > secrets/db_password.txt
 
-# FTP and 7zip credentials (Fernet-encrypted)
+# FTP and 7zip credentials (Fernet-encrypted ciphertext only)
 # Copy from a secure location — these are not generated automatically
 cp /path/to/IBIS_ftp.ini secrets/
-cp /path/to/IBIS_ftp.key secrets/
 cp /path/to/Sevenz.ini   secrets/
-cp /path/to/Sevenz.key   secrets/
 ```
 
-**2. Add your config:**
+**2. Set the matching Fernet decryption keys as environment variables** (in a gitignored `.env` file — docker compose loads it automatically):
+```bash
+cat >> .env <<'EOF'
+IBIS_FTP_FERNET_KEY=<key for IBIS_ftp.ini>
+IBIS_SEVENZ_FERNET_KEY=<key for Sevenz.ini>
+EOF
+```
+Keys and ciphertext live in different places on purpose — see [Secrets](#secrets) below.
+
+**3. Add your config:**
 ```bash
 cp config.json.example config.json
 # Edit config.json: FTP hostname, community names, country codes, cron schedules
 ```
 
-**3. Run the full pipeline once:**
+**4. Run the full pipeline once:**
 ```bash
 docker compose run --rm etl python ibis.py -a
 ```
 
-**4. Start the scheduled service:**
+**5. Start the scheduled service:**
 ```bash
 docker compose up -d
 ```
@@ -113,6 +120,42 @@ Register the server: Host `db`, Port `5432`, Database `ibis`, Username `ibis_use
 docker compose exec db psql -U ibis_user -d ibis
 ```
 
+`ibis_user` has full DDL/write access to every schema — it's the ETL's own role, not a reporting credential. For pgAdmin, BI tools, or any read-only use, set up the `ibis_readonly` role instead (see below) rather than handing out `ibis_user`'s password.
+
+---
+
+## Read-only reporting access
+
+The pipeline can provision a second Postgres role, `ibis_readonly`, with `SELECT`-only access to every schema — so dashboards and reporting tools never need the same write/DDL privileges as the ETL itself. This is opt-in; nothing changes until you configure it:
+
+**1. Create the password secret:**
+```bash
+echo 'a-different-password' > secrets/db_readonly_password.txt
+```
+
+**2. Add the secret to `docker-compose.yml`** (mirroring `db_password`):
+```yaml
+secrets:
+  db_readonly_password:
+    file: ./secrets/db_readonly_password.txt
+
+services:
+  etl:
+    secrets:
+      - db_password
+      - db_readonly_password   # add this line
+```
+
+**3. Point `config.json` at it:**
+```json
+"db": {
+  "...": "...",
+  "readonly_password_secret_file": "/run/secrets/db_readonly_password"
+}
+```
+
+The next pipeline run creates (or updates the password of) `ibis_readonly` and grants it `SELECT` on all current and future tables in every schema. Connect reporting tools with username `ibis_readonly` and this password instead of `ibis_user`'s.
+
 ---
 
 ## Configuration
@@ -123,10 +166,10 @@ docker compose exec db psql -U ibis_user -d ibis
 |-----|-------------|
 | `ftp` | SFTP hostname and username |
 | `communities` | Per-country community name and remote path mapping |
-| `keyfiles` | Paths to Fernet credential files inside the container (`secrets/`) |
+| `keyfiles` | Paths to Fernet ciphertext files inside the container (`secrets/`) — decryption keys come from environment variables, see [Secrets](#secrets) |
 | `access_table_name` | Name of the table to export from each MDB file |
 | `excluded_tablets` | List of tablet IDs to skip during ingestion |
-| `db` | PostgreSQL connection details (`host`, `port`, `name`, `user`, `password_secret_file`) |
+| `db` | PostgreSQL connection details (`host`, `port`, `name`, `user`, `password_secret_file`, optional `readonly_password_secret_file` — see [Read-only reporting access](#read-only-reporting-access)) |
 | `trial` | `dedup_key`, `country_code_map` (country → integer countrycode) |
 | `schedule` | `pipeline_cron`, `store_cron`, `dlr_cron`, `sms_weekly_report_cron`, `incentive_report_cron`, `backup_cron` in standard cron format (UTC) |
 | `email` | *(optional)* SMTP settings for pipeline notifications — see below |
@@ -159,20 +202,14 @@ When an `email` block is present in `config.json`, the pipeline sends two types 
   },
   "notify_countries": ["uganda", "kenya"],
   "keyfiles": {
-    "smtp_ini": "secrets/SMTP.ini",
-    "smtp_key": "secrets/SMTP.key"
+    "smtp_ini": "secrets/SMTP.ini"
   }
 }
 ```
 
 `notify_countries` filters the validation report before triggering field emails — useful to suppress noise from countries not yet in active data collection.
 
-SMTP credentials are Fernet-encrypted. Add the credential files to `secrets/`:
-
-| File | Purpose |
-|------|---------|
-| `secrets/SMTP.ini` | Contains `Password=<fernet-encrypted-value>` |
-| `secrets/SMTP.key` | Fernet key for the SMTP password |
+SMTP credentials are Fernet-encrypted. Add `secrets/SMTP.ini` (ciphertext) and set `IBIS_SMTP_FERNET_KEY` (the decryption key) as an environment variable — see [Secrets](#secrets) below for why these live in different places.
 
 The SMTP username is stored in `config.json` as `smtp_username` (not encrypted). For Gmail, use an [App Password](https://support.google.com/accounts/answer/185833) rather than your account password.
 
@@ -180,17 +217,17 @@ The SMTP username is stored in `config.json` as `smtp_username` (not encrypted).
 
 ## Secrets
 
-All sensitive files live in `secrets/` (gitignored, never committed):
+Encrypted credential files live in `secrets/` (gitignored, never committed). The Fernet key that decrypts each one is deliberately **not** stored there — a key sitting next to the ciphertext it protects means anyone with read access to the directory holds both the lock and the key. Keys are read from environment variables instead (e.g. via a gitignored `.env` file that docker compose loads automatically, or your platform's own secret store):
 
-| File | Purpose |
-|------|---------|
-| `db_password.txt` | PostgreSQL password — read by postgres via `POSTGRES_PASSWORD_FILE` and by the ETL app |
-| `IBIS_ftp.ini` | Fernet-encrypted FTP credentials |
-| `IBIS_ftp.key` | Fernet key for FTP credentials |
-| `Sevenz.ini` | Fernet-encrypted 7zip password |
-| `Sevenz.key` | Fernet key for 7zip password |
-| `SMTP.ini` | Fernet-encrypted SMTP password (optional — only needed if `email` is configured) |
-| `SMTP.key` | Fernet key for SMTP password |
+| File in `secrets/` | Purpose | Decryption key |
+|---------------------|---------|----------------|
+| `db_password.txt` | PostgreSQL password — read by postgres via `POSTGRES_PASSWORD_FILE` and by the ETL app | *(not encrypted — plain password, mounted as a Docker secret)* |
+| `IBIS_ftp.ini` | Fernet-encrypted FTP credentials | `IBIS_FTP_FERNET_KEY` env var |
+| `Sevenz.ini` | Fernet-encrypted 7zip password | `IBIS_SEVENZ_FERNET_KEY` env var |
+| `SMTP.ini` | Fernet-encrypted SMTP password (optional — only needed if `email` is configured) | `IBIS_SMTP_FERNET_KEY` env var |
+| `BLASTA.ini` | Fernet-encrypted BLASTA credentials (optional — only needed if `sms` is configured) | `IBIS_BLASTA_FERNET_KEY` env var |
+
+Each key-loading function (`get_decrypted_password`, `_load_smtp_password`, `_load_blasta_creds`) still accepts an optional key-file path as a local-development fallback — it logs a warning when used, since that path recreates the co-location problem. Production and any shared environment should always set the env var.
 
 The `db_password.txt` file is mounted as a Docker secret (tmpfs inside the container — never written to disk).
 

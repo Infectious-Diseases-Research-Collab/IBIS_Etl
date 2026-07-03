@@ -22,7 +22,13 @@ Automated SMS sending for Uganda study participants at week-8 and week-11 follow
 python scripts/encrypt_blasta_creds.py
 ```
 
-Creates `secrets/BLASTA.ini` and `secrets/BLASTA.key`. Keep both files secure — they are gitignored.
+Creates `secrets/BLASTA.ini` (encrypted password, gitignored) and prints the Fernet key to your terminal. Set it as an environment variable rather than saving it to disk next to the ciphertext it decrypts:
+
+```bash
+export IBIS_BLASTA_FERNET_KEY='<the printed key>'
+```
+
+For docker compose, put it in a `.env` file (gitignored, auto-loaded by compose) instead of exporting it in your shell. `--write-key-file` recreates the old `secrets/BLASTA.key` fallback for local development only.
 
 ### 2. Add SMS config to `config.json`
 
@@ -30,12 +36,13 @@ Creates `secrets/BLASTA.ini` and `secrets/BLASTA.key`. Keep both files secure �
 "sms": {
     "messages_dir": "data/sms_messages",
     "blasta_ini":   "secrets/BLASTA.ini",
-    "blasta_key":   "secrets/BLASTA.key",
     "max_retries":  3,
     "dry_run":      false,
     "countrycode":  "1"
 }
 ```
+
+`blasta_key` (a path to a key file) is no longer required — the Fernet key comes from `IBIS_BLASTA_FERNET_KEY`. It's still accepted as a local-dev fallback if you'd rather not set the env var.
 
 ### 3. Seed message templates
 
@@ -69,6 +76,7 @@ docker compose run --rm etl python sms.py --dry-run        # log what would be s
 docker compose run --rm etl python sms.py --sync           # sync queue only, no sending
 docker compose run --rm etl python sms.py --check-delivery # poll BLASTA for DLR status updates
 docker compose run --rm etl python sms.py --weekly-report  # send weekly facility report email
+docker compose run --rm etl python sms.py --resend --week <n> --subjid <id...> --actor <name> # audited manual resend, see below
 ```
 
 ---
@@ -78,6 +86,8 @@ docker compose run --rm etl python sms.py --weekly-report  # send weekly facilit
 After messages are sent, BLASTA asynchronously updates delivery status. The `--check-delivery` job polls BLASTA for each message that is still `pending` in `sms.log` and writes the result (`DELIVERED`, `FAILED`, or `NOT_FOUND`) back to `sms.log.delivery_status`.
 
 Run this job one hour after the pipeline sends messages so most receipts have had time to arrive.
+
+Exits non-zero only when every row it checked errored (a few transient lookup failures alongside otherwise-successful checks are not treated as a job failure) — useful if you wire cron exit codes into monitoring.
 
 ---
 
@@ -125,15 +135,17 @@ GROUP BY delivery_status;
 
 ## Retrying failed messages
 
-Failed messages are not automatically retried. To retry manually:
+Failed messages are not automatically retried. Use `sms.py --resend` rather than a raw `UPDATE sms.queue` statement — it's audited (who requested it, when, and why is written to `sms.resend_log`), whereas a manual SQL update leaves no record:
 
-```sql
-UPDATE sms.queue SET status = 'pending'
-WHERE status = 'failed'
-AND subjid IN ('IBIS1234-567', 'IBIS1234-568');
+```bash
+docker compose run --rm etl python sms.py --resend \
+  --week 8 --subjid IBIS1234-567 IBIS1234-568 \
+  --actor "your name" --note "confirmed number by phone"
 ```
 
-Then run `python sms.py` or the full pipeline.
+This resets the matching `sms.queue` rows to `pending`. Then run `python sms.py` or the full pipeline to actually resend them.
+
+The daily `--check-delivery` job emails this exact command (with `--week`/`--subjid` pre-filled) to `sms_dm_recipients` whenever a message fails to reach BLASTA — just fill in `--actor`.
 
 ---
 
@@ -238,5 +250,5 @@ scripts/seed_sms_templates.py     Load Excel templates into sms.templates
 sql/sms/init_sms_schema.sql       CREATE TABLE statements
 data/sms_messages/                Excel message files
 secrets/BLASTA.ini                Encrypted BLASTA credentials (gitignored)
-secrets/BLASTA.key                Fernet key (gitignored)
+IBIS_BLASTA_FERNET_KEY            Fernet key (env var — not a file; see Setup above)
 ```

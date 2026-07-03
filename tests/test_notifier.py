@@ -239,6 +239,65 @@ def test_send_pipeline_report_does_not_raise_on_smtp_error(tmp_path):
 # _build_sms_summary
 # ---------------------------------------------------------------------------
 
+# ---------------------------------------------------------------------------
+# send_sms_flagged_alert
+# ---------------------------------------------------------------------------
+
+def _plain_text_body(msg_string: str) -> str:
+    """Extract and decode the text/plain part from a serialized MIME message
+    (the body is base64-encoded by default for non-ASCII utf-8 content, so a
+    raw substring search on msg_string won't find plain-language content)."""
+    import email
+    msg = email.message_from_string(msg_string)
+    for part in msg.walk():
+        if part.get_content_type() == 'text/plain':
+            return part.get_payload(decode=True).decode('utf-8')
+    raise AssertionError('no text/plain part found')
+
+
+def test_send_sms_flagged_alert_emits_audited_resend_command_not_raw_sql(tmp_path):
+    """The remediation instructions must route through `sms.py --resend`
+    (audited, logged to sms.resend_log) rather than a raw UPDATE statement
+    that leaves no record of who ran it."""
+    from modules.notifier import send_sms_flagged_alert
+
+    email_cfg = _make_email_cfg(tmp_path)
+    email_cfg['sms_dm_recipients'] = ['dm@example.com']
+    config = _config(email_cfg)
+
+    flagged = [
+        {'subjid': 'IBIS001', 'health_facility_ug': '11', 'week': 8, 'last_error': 'timeout'},
+        {'subjid': 'IBIS002', 'health_facility_ug': '11', 'week': 8, 'last_error': 'timeout'},
+    ]
+
+    mock_smtp_instance = MagicMock()
+    with patch('smtplib.SMTP') as mock_smtp_cls:
+        mock_smtp_cls.return_value.__enter__.return_value = mock_smtp_instance
+        send_sms_flagged_alert(flagged, config, engine=MagicMock())
+
+    body = _plain_text_body(mock_smtp_instance.sendmail.call_args[0][2])
+    assert 'UPDATE sms.queue' not in body
+    assert '--resend' in body
+    assert '--week 8' in body
+    assert 'IBIS001' in body and 'IBIS002' in body
+    assert '--actor' in body
+
+
+def test_send_sms_flagged_alert_skips_when_no_recipients(tmp_path):
+    from modules.notifier import send_sms_flagged_alert
+
+    email_cfg = _make_email_cfg(tmp_path)  # no sms_dm_recipients
+    config = _config(email_cfg)
+
+    with patch('smtplib.SMTP') as mock_smtp_cls:
+        send_sms_flagged_alert(
+            [{'subjid': 'X', 'health_facility_ug': '11', 'week': 8, 'last_error': 'e'}],
+            config, engine=MagicMock(),
+        )
+
+    mock_smtp_cls.assert_not_called()
+
+
 def test_build_sms_summary_shows_sent_failed_skipped():
     from modules.notifier import _build_sms_summary
     from stages.base import StageResult
@@ -307,6 +366,81 @@ def test_build_weekly_sms_report_includes_sites_and_week_ending():
     assert 'Pending' in report
     assert 'Submitted' not in report    # old label must be gone
     assert 'Undelivered' not in report  # old label must be gone
+
+
+# ---------------------------------------------------------------------------
+# Shared table-formatting helpers (_ordered_sites_present / _table_header /
+# _table_separator) — extracted from what used to be four copy-pasted
+# versions of the same "which sites appear, in canonical order" and
+# "build the header/separator row" logic across the weekly SMS and
+# follow-up table/DataFrame builders.
+# ---------------------------------------------------------------------------
+
+def test_ordered_sites_present_filters_and_preserves_canonical_order():
+    from modules.notifier import _ordered_sites_present
+    # '13' appears before '11' in the input rows, but canonical order (as
+    # declared in _UG_SITE_NAMES) must win, and '12'/'14' (absent) must be excluded.
+    rows = [{'health_facility_ug': '13'}, {'health_facility_ug': '11'}]
+    assert _ordered_sites_present(rows) == ['11', '13']
+
+
+def test_ordered_sites_present_supports_alternate_key():
+    from modules.notifier import _ordered_sites_present
+    rows = [{'site': '14'}]
+    assert _ordered_sites_present(rows, key='site') == ['14']
+
+
+def test_table_header_and_separator_widths_match():
+    from modules.notifier import _table_header, _table_separator
+    # col_w=17 matches production usage — large enough that no site name
+    # exceeds it (format specs pad short strings but never truncate long
+    # ones, so a too-small col_w would make header longer than sep).
+    header = _table_header(label_w=10, col_w=17, site_codes=['11', '12'])
+    sep = _table_separator(label_w=10, col_w=17, n_sites=2)
+    assert len(header) == len(sep)
+    assert header.rstrip().endswith('Total')
+
+
+def test_build_weekly_sms_table_renders_full_grid():
+    """Locks in the exact table shape (header/separator/row layout) the
+    weekly SMS report email depends on — this format is relied on by field
+    teams and must not shift silently when the builder is refactored."""
+    from modules.notifier import _build_weekly_sms_table
+
+    rows = [
+        {'health_facility_ug': '11', 'week': 8, 'due': 10, 'submitted': 9,
+         'delivered': 8, 'undelivered': 1, 'pending': 0},
+        {'health_facility_ug': '12', 'week': 8, 'due': 5, 'submitted': 5,
+         'delivered': 5, 'undelivered': 0, 'pending': 0},
+    ]
+    result = _build_weekly_sms_table(rows, 'This week')
+    lines = result.split('\n')
+
+    assert lines[0] == 'This week'
+    assert len(lines[1]) == len(lines[2])  # separator width == header width
+    assert 'Bushenyi HCIV' in lines[2]
+    assert 'Ishaka Adv. Hosp' in lines[2]
+    assert lines[2].rstrip().endswith('Total')
+    assert any('Week 8' in l and 'Due' in l for l in lines)
+    assert any('Delivered' in l for l in lines)
+
+
+def test_build_followup_table_renders_full_grid():
+    """Same guarantee as above for the follow-up tracking table."""
+    from modules.notifier import _build_followup_table
+
+    rows = [
+        {'health_facility_ug': '11', 'entered_window': 10, 'primary_endpoint_done': 6,
+         'done_not_due': 2, 'due_pending': 1, 'overdue': 1},
+    ]
+    result = _build_followup_table(rows)
+    lines = result.split('\n')
+
+    assert lines[0] == 'Follow-up Tracking — Uganda'
+    assert len(lines[1]) == len(lines[2])  # separator width == header width
+    assert 'Bushenyi HCIV' in lines[2]
+    assert lines[2].rstrip().endswith('Total')
+    assert any('Entered follow-up period' in l for l in lines)
 
 
 def test_build_weekly_sms_table_no_activity():

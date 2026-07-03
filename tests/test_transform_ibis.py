@@ -1,4 +1,3 @@
-import pytest
 from unittest.mock import MagicMock, patch, call
 from pathlib import Path
 
@@ -32,7 +31,13 @@ def test_transform_ibis_executes_all_sql_files(tmp_path):
     assert mock_conn.execute.called
 
 
-def test_transform_ibis_raises_on_sql_error(tmp_path):
+def test_transform_ibis_reports_error_on_sql_failure(tmp_path):
+    """
+    A SQL error must fail the stage (surfaced as a StageResult error, not an
+    uncaught exception — an uncaught exception here would only be caught and
+    re-stringified one level up by ibis.py's generic handler, losing the
+    "which file" context the formatted message carries).
+    """
     (tmp_path / 'bad.sql').write_text('NOT VALID SQL')
 
     engine = MagicMock()
@@ -45,5 +50,9 @@ def test_transform_ibis_raises_on_sql_error(tmp_path):
     stage = TransformIbis(config=config, engine=engine)
 
     with patch('stages.transform_ibis.SQL_TRANSFORM_DIR', str(tmp_path)):
-        with pytest.raises(Exception, match="SQL syntax error"):
-            stage.run()
+        result = stage.run()
+
+    assert not result.success
+    assert len(result.errors) == 1
+    assert "SQL error in 'bad.sql'" in result.errors[0]
+    assert 'SQL syntax error' in result.errors[0]

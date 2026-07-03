@@ -166,6 +166,70 @@ def test_run_quarantines_corrupt_mdb_and_continues():
     )
 
 
+def test_run_quarantines_with_unique_dest_on_collision():
+    """
+    If a folder with the same name is already in Quarantine/ (e.g. the same
+    archive was re-extracted after a prior quarantine), the move must still
+    succeed — using a timestamp-suffixed destination — rather than raising
+    and leaving the corrupt file in the active tree to be retried forever.
+    """
+    config = _make_config()
+    engine = MagicMock()
+
+    def fake_ingest(db_path, table_name, country, community):
+        raise RuntimeError("mdb-export failed: offset 4096 is beyond EOF")
+
+    with patch('stages.mdb_to_bronze.get_country_paths',
+               return_value={'extract_path': '/fake/Extracted/Uganda'}), \
+         patch('stages.mdb_to_bronze.glob_module.glob',
+               return_value=['/fake/Extracted/Uganda/Tablet53_2026_05_28/IBIS_pilot.mdb']), \
+         patch('stages.mdb_to_bronze.select_latest_per_tablet',
+               return_value=['/fake/Extracted/Uganda/Tablet53_2026_05_28/IBIS_pilot.mdb']), \
+         patch('stages.mdb_to_bronze.list_mdb_tables', return_value=[]), \
+         patch.object(MdbToBronze, '_ingest_file', side_effect=fake_ingest), \
+         patch('stages.mdb_to_bronze.os.makedirs'), \
+         patch('stages.mdb_to_bronze.os.path.exists', return_value=True), \
+         patch('stages.mdb_to_bronze.shutil') as mock_shutil:
+        stage = MdbToBronze(config=config, engine=engine)
+        result = stage.run()
+
+    assert result.success
+    mock_shutil.move.assert_called_once()
+    src, dest = mock_shutil.move.call_args[0]
+    assert src == '/fake/Extracted/Uganda/Tablet53_2026_05_28'
+    # Collision must be resolved with a distinct destination, not the bare name.
+    assert dest != '/fake/Extracted/Uganda/Quarantine/Tablet53_2026_05_28'
+    assert dest.startswith('/fake/Extracted/Uganda/Quarantine/Tablet53_2026_05_28_')
+
+
+def test_run_reports_error_when_quarantine_move_fails():
+    """If shutil.move itself raises even after collision handling, the stage
+    must surface it as an error — not just a log line — since the corrupt
+    file is left in the active tree and will be retried on every future run."""
+    config = _make_config()
+    engine = MagicMock()
+
+    def fake_ingest(db_path, table_name, country, community):
+        raise RuntimeError("mdb-export failed: offset 4096 is beyond EOF")
+
+    with patch('stages.mdb_to_bronze.get_country_paths',
+               return_value={'extract_path': '/fake/Extracted/Uganda'}), \
+         patch('stages.mdb_to_bronze.glob_module.glob',
+               return_value=['/fake/Extracted/Uganda/Tablet53_2026_05_28/IBIS_pilot.mdb']), \
+         patch('stages.mdb_to_bronze.select_latest_per_tablet',
+               return_value=['/fake/Extracted/Uganda/Tablet53_2026_05_28/IBIS_pilot.mdb']), \
+         patch('stages.mdb_to_bronze.list_mdb_tables', return_value=[]), \
+         patch.object(MdbToBronze, '_ingest_file', side_effect=fake_ingest), \
+         patch('stages.mdb_to_bronze.os.makedirs'), \
+         patch('stages.mdb_to_bronze.shutil') as mock_shutil:
+        mock_shutil.move.side_effect = OSError('disk full')
+        stage = MdbToBronze(config=config, engine=engine)
+        result = stage.run()
+
+    assert not result.success
+    assert any('disk full' in e for e in result.errors)
+
+
 def test_run_continues_when_list_mdb_tables_raises():
     """run() does not fail when list_mdb_tables raises for a file."""
     config = _make_config()

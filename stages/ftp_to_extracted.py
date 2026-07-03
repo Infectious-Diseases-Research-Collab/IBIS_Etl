@@ -125,11 +125,13 @@ class FtpToExtracted(BaseStage):
         username = ftp['username_ibis']
         ftp_password = get_decrypted_password(
             keyfiles['ftp_cred_filename_IBIS'],
-            keyfiles['ftp_key_file_IBIS'],
+            'IBIS_FTP_FERNET_KEY',
+            keyfiles.get('ftp_key_file_IBIS'),
         )
         sevenz_password = get_decrypted_password(
             keyfiles['sevenz_cred_filename'],
-            keyfiles['sevenz_key_file'],
+            'IBIS_SEVENZ_FERNET_KEY',
+            keyfiles.get('sevenz_key_file'),
         )
 
         total_downloaded = 0

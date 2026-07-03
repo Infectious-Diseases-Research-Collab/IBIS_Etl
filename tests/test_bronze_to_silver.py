@@ -95,6 +95,48 @@ def test_bronze_to_silver_processes_followup():
     assert len(written['silver_ibis.followup']) == 1
 
 
+def test_bronze_to_silver_writes_both_tables_in_one_transaction():
+    """baseline and followup must be written on the same engine.begin() block —
+    two separate transactions would let a crash between them leave silver_ibis
+    with a fresh baseline and a stale followup."""
+    baseline_raw = pd.DataFrame({
+        'uniqueid': ['a'],
+        'countrycode': [1],
+        'country': ['uganda'],
+        'community': ['Mbarara'],
+        'extracted_at': [None],
+        'run_uuid': ['r1'],
+        'file_name': ['f1'],
+        'file_path': ['p1'],
+    })
+    followup_raw = pd.DataFrame({
+        'uniqueid': ['a'],
+        'countrycode': [1],
+        'country': ['uganda'],
+        'community': ['Mbarara'],
+        'extracted_at': [None],
+        'run_uuid': ['r1'],
+        'file_name': ['f1'],
+        'file_path': ['p1'],
+    })
+
+    engine = MagicMock()
+
+    def fake_read_sql(query, conn):
+        # Both reads must happen on the connection engine.begin() yielded,
+        # never directly on the engine.
+        assert conn is engine.begin.return_value.__enter__.return_value
+        return followup_raw if 'followup' in query else baseline_raw
+
+    with patch('stages.bronze_to_silver.pd.read_sql', side_effect=fake_read_sql), \
+         patch.object(pd.DataFrame, 'to_sql'):
+        stage = BronzeToSilver(config=_make_config(), engine=engine)
+        result = stage.run()
+
+    assert result.success
+    engine.begin.assert_called_once()
+
+
 def test_bronze_to_silver_succeeds_when_followup_empty():
     """Stage succeeds (with warning) if bronze_ibis.followup is empty."""
     baseline_raw = pd.DataFrame({

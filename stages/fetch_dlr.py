@@ -10,8 +10,17 @@ logger = logging.getLogger(__name__)
 
 
 class FetchDlr(BaseStage):
+    """
+    Polls Blasta for delivery status of previously sent messages and alerts
+    the data manager about anything that never reached the provider.
+
+    Invoked from sms.py's --check-delivery flag on its own cron schedule
+    (dlr_cron) — deliberately not part of ibis.py's stage graph or --all run.
+    DLR status often isn't available until well after a message is sent, so
+    checking it needs to run on a separate, later schedule rather than in
+    the same nightly pipeline pass that calls SendSms.
+    """
     name = 'fetch_dlr'
-    dependencies: list[str] = ['send_sms']  # logical dependency; not part of --all
 
     def run(self) -> StageResult:
         processor = SmsProcessor(config=self.config, engine=self.engine)

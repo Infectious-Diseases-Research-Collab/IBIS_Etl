@@ -6,7 +6,15 @@ import sys
 from collections import defaultdict, deque
 
 from modules.config import ConfigLoader
-from modules.db import create_db_engine, init_schemas, init_sms_tables, run_migrations
+from modules.db import (
+    PipelineLockError,
+    create_db_engine,
+    init_readonly_role,
+    init_schemas,
+    init_sms_tables,
+    pipeline_lock,
+    run_migrations,
+)
 from stages.base import StageResult
 
 from stages.ftp_to_extracted import FtpToExtracted
@@ -38,6 +46,11 @@ STAGE_CLASSES = {
 }
 
 STAGE_DEPS = {name: cls.dependencies for name, cls in STAGE_CLASSES.items()}
+
+# Shared across `-a` and `-p <stage>` invocations — a single-stage run (e.g.
+# store_ibis) still touches schemas a full run writes to, so both must be
+# serialised against each other, not just against themselves.
+PIPELINE_LOCK_NAME = 'ibis_etl_pipeline'
 
 
 def topological_sort(deps: dict[str, list[str]]) -> list[str]:
@@ -126,6 +139,22 @@ def _log_summary(results: dict[str, StageResult], failed: set[str]) -> None:
         logger.warning(f'Result: FAILED ({len(failed)} stage(s))')
 
 
+def _maybe_init_readonly_role(config: ConfigLoader, engine) -> None:
+    """Provision the read-only reporting role if a password secret is configured.
+    Opt-in: skipped (with a one-time log line) when not configured, so this
+    is safe to introduce without forcing every deployment to set it up."""
+    secret_file = (config.get('db') or {}).get('readonly_password_secret_file')
+    if not secret_file:
+        logger.debug(
+            "db.readonly_password_secret_file not set — skipping read-only "
+            "role provisioning."
+        )
+        return
+    with open(secret_file) as f:
+        password = f.read().strip()
+    init_readonly_role(engine, password)
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description='IBIS ETL orchestrator')
     parser.add_argument('-p', '--pipeline', help='Run a single named stage')
@@ -141,12 +170,19 @@ def main() -> None:
 
     config = ConfigLoader('config.json')
     engine = create_db_engine(config)
-    init_schemas(engine)
-    run_migrations(engine)
-    init_sms_tables(engine)
 
-    stages = build_run_list(STAGE_DEPS, run_all=args.all, pipeline=args.pipeline)
-    run_pipeline(stages, config, engine)
+    try:
+        with pipeline_lock(engine, PIPELINE_LOCK_NAME):
+            init_schemas(engine)
+            run_migrations(engine)
+            init_sms_tables(engine)
+            _maybe_init_readonly_role(config, engine)
+
+            stages = build_run_list(STAGE_DEPS, run_all=args.all, pipeline=args.pipeline)
+            run_pipeline(stages, config, engine)
+    except PipelineLockError as exc:
+        logger.error(str(exc))
+        sys.exit(1)
 
 
 if __name__ == '__main__':

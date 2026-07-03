@@ -38,6 +38,17 @@ services:
         condition: service_healthy
     secrets:
       - db_password
+    # Fernet decryption keys are injected as environment variables rather
+    # than mounted from secrets/ alongside the ciphertext they decrypt — see
+    # README.md#secrets. Populate these in a .env file (gitignored) or the
+    # host/orchestrator's own secret store; docker compose reads .env
+    # automatically. Any that are unset fall back to the matching *_key file
+    # in secrets/ for local development only.
+    environment:
+      IBIS_FTP_FERNET_KEY: ${IBIS_FTP_FERNET_KEY:-}
+      IBIS_SEVENZ_FERNET_KEY: ${IBIS_SEVENZ_FERNET_KEY:-}
+      IBIS_BLASTA_FERNET_KEY: ${IBIS_BLASTA_FERNET_KEY:-}
+      IBIS_SMTP_FERNET_KEY: ${IBIS_SMTP_FERNET_KEY:-}
     volumes:
       - .:/app
       - ./config.json:/app/config.json:ro

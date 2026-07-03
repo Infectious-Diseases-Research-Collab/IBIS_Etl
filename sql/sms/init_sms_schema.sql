@@ -51,6 +51,18 @@ CREATE TABLE IF NOT EXISTS sms.opt_outs (
     opted_out_at  TIMESTAMP DEFAULT NOW()
 );
 
+-- Audit trail for manually resent messages (sms.py --resend). Without this,
+-- resetting a flagged message back to 'pending' leaves no record of who
+-- requested it, when, or why.
+CREATE TABLE IF NOT EXISTS sms.resend_log (
+    id         SERIAL PRIMARY KEY,
+    subjid     TEXT    NOT NULL,
+    week       INTEGER NOT NULL,
+    actor      TEXT    NOT NULL,
+    note       TEXT,
+    resent_at  TIMESTAMP DEFAULT NOW()
+);
+
 CREATE INDEX IF NOT EXISTS sms_log_queue_id_idx ON sms.log (queue_id);
 
 -- One row per participant/week: consolidated delivery status, latest send details.

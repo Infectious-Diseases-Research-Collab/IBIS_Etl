@@ -31,17 +31,27 @@ class TransformIbis(BaseStage):
 
         errors: list[str] = []
 
-        with self.engine.begin() as conn:
-            for sql_path in sql_files:
-                sql = sql_path.read_text()
-                try:
-                    conn.execute(text(sql))
-                    logger.info(f"Executed: {sql_path.name}")
-                except Exception as exc:
-                    msg = f"SQL error in '{sql_path.name}': {exc}"
-                    logger.error(msg)
-                    errors.append(msg)
-                    raise  # roll back the transaction
+        # The inner raise aborts the transaction on the first failing file
+        # (Postgres won't run further statements in an aborted transaction
+        # anyway) and rolls back via engine.begin(). The outer except exists
+        # only to get back to the return below with *errors* populated —
+        # letting the exception propagate to the caller would report just
+        # the bare exception, discarding the "which file" context.
+        try:
+            with self.engine.begin() as conn:
+                for sql_path in sql_files:
+                    try:
+                        sql = sql_path.read_text()
+                        conn.execute(text(sql))
+                        logger.info(f"Executed: {sql_path.name}")
+                    except Exception as exc:
+                        msg = f"SQL error in '{sql_path.name}': {exc}"
+                        logger.error(msg)
+                        errors.append(msg)
+                        raise
+        except Exception as exc:
+            if not errors:
+                errors.append(str(exc))
 
         return StageResult(
             success=len(errors) == 0,

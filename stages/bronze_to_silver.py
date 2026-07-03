@@ -24,24 +24,30 @@ class BronzeToSilver(BaseStage):
         errors: list[str] = []
         total_written = 0
 
-        n, errs = self._process_table('baseline', dedup_key, country_code_map)
-        total_written += n
-        errors.extend(errs)
+        # baseline and followup are written on one connection/transaction so a
+        # crash between them can't leave silver_ibis with a fresh baseline and
+        # a stale followup (or vice versa) — they move together or not at all.
+        with self.engine.begin() as conn:
+            n, errs = self._process_table(conn, 'baseline', dedup_key, country_code_map)
+            total_written += n
+            errors.extend(errs)
 
-        n, errs = self._process_table('followup', dedup_key, country_code_map)
-        total_written += n
-        errors.extend(errs)
+            n, errs = self._process_table(conn, 'followup', dedup_key, country_code_map)
+            total_written += n
+            errors.extend(errs)
 
         return StageResult(success=len(errors) == 0, rows_written=total_written, errors=errors)
 
     def _process_table(
         self,
+        conn,
         table_name: str,
         dedup_key: str,
         country_code_map: dict[str, int],
     ) -> tuple[int, list[str]]:
-        """Clean bronze_ibis.<table_name> → silver_ibis.<table_name>. Returns (rows_written, errors)."""
-        bronze_df = pd.read_sql(f'SELECT * FROM bronze_ibis.{table_name}', self.engine)
+        """Clean bronze_ibis.<table_name> → silver_ibis.<table_name>. Returns (rows_written, errors).
+        Runs entirely on *conn* so the caller controls the transaction boundary."""
+        bronze_df = pd.read_sql(f'SELECT * FROM bronze_ibis.{table_name}', conn)
 
         if bronze_df.empty:
             logger.warning(f"bronze_ibis.{table_name} is empty — skipping.")
@@ -107,9 +113,8 @@ class BronzeToSilver(BaseStage):
             'loaded': True,
         }])
 
-        with self.engine.begin() as conn:
-            silver_df.to_sql(table_name, conn, schema='silver_ibis', if_exists='replace', index=False)
-            meta.to_sql('meta', conn, schema='silver_ibis', if_exists='append', index=False)
+        silver_df.to_sql(table_name, conn, schema='silver_ibis', if_exists='replace', index=False)
+        meta.to_sql('meta', conn, schema='silver_ibis', if_exists='append', index=False)
 
         logger.info(f"Wrote {len(silver_df)} rows → silver_ibis.{table_name}.")
         return len(silver_df), errors

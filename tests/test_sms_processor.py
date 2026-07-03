@@ -639,6 +639,53 @@ def test_get_flagged_messages_empty_when_none():
 
 
 # ---------------------------------------------------------------------------
+# SmsProcessor.resend
+# ---------------------------------------------------------------------------
+
+def test_resend_updates_queue_and_writes_audit_log():
+    from modules.sms_processor import SmsProcessor
+
+    engine, conn = make_engine_mock(rowcount=2)
+    processor = SmsProcessor(config=make_config(), engine=engine)
+
+    updated = processor.resend(
+        ['IBIS001', 'IBIS002'], 8, actor='jdoe@example.com', note='confirmed by phone',
+    )
+
+    assert updated == 2
+    executed_sql = [str(c.args[0]) for c in conn.execute.call_args_list]
+    assert any('UPDATE sms.queue' in s for s in executed_sql)
+    assert sum('INSERT INTO sms.resend_log' in s for s in executed_sql) == 2
+
+    # actor/note must actually be passed through as bind params, not just
+    # present somewhere in the call list.
+    insert_calls = [
+        c for c in conn.execute.call_args_list
+        if 'INSERT INTO sms.resend_log' in str(c.args[0])
+    ]
+    params = [c.args[1] for c in insert_calls]
+    assert {p['subjid'] for p in params} == {'IBIS001', 'IBIS002'}
+    assert all(p['actor'] == 'jdoe@example.com' for p in params)
+    assert all(p['note'] == 'confirmed by phone' for p in params)
+    assert all(p['week'] == 8 for p in params)
+
+
+def test_resend_returns_zero_when_no_rows_match():
+    from modules.sms_processor import SmsProcessor
+
+    engine, conn = make_engine_mock(rowcount=0)
+    processor = SmsProcessor(config=make_config(), engine=engine)
+
+    updated = processor.resend(['NOBODY'], 11, actor='jdoe@example.com')
+
+    assert updated == 0
+    # Audit row is still written even if the queue update matched nothing —
+    # the attempt itself is what needs a record.
+    executed_sql = [str(c.args[0]) for c in conn.execute.call_args_list]
+    assert any('INSERT INTO sms.resend_log' in s for s in executed_sql)
+
+
+# ---------------------------------------------------------------------------
 # SmsProcessor.get_weekly_report_data / get_cumulative_report_data
 # ---------------------------------------------------------------------------
 

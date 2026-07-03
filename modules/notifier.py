@@ -12,6 +12,7 @@ from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 from cryptography.fernet import Fernet
 import pandas as pd
+from modules.utils import load_fernet_key
 from stages.base import StageResult
 
 logger = logging.getLogger(__name__)
@@ -25,14 +26,14 @@ _UG_SITE_NAMES: dict[str, str] = {
 }
 
 
-def _load_smtp_password(ini_path: str, key_path: str) -> str:
+def _load_smtp_password(ini_path: str, key_path: str | None = None) -> str:
     """
-    Read the Fernet-encrypted Password from ini_path using the key in key_path.
+    Read the Fernet-encrypted Password from ini_path.
+    The Fernet key is read from IBIS_SMTP_FERNET_KEY (preferred) or, as a
+    local-dev fallback, from key_path.
     Raises KeyError if 'Password' is absent from the ini file.
     """
-    with open(key_path, 'r') as f:
-        key = f.read().strip().encode()
-    cipher = Fernet(key)
+    cipher = Fernet(load_fernet_key('IBIS_SMTP_FERNET_KEY', key_path))
 
     cfg: dict[str, str] = {}
     with open(ini_path, 'r') as f:
@@ -131,7 +132,7 @@ def _send(
 ) -> None:
     """Assemble a multipart email and send it via SMTP with STARTTLS."""
     ini_path = email_cfg['keyfiles']['smtp_ini']
-    key_path = email_cfg['keyfiles']['smtp_key']
+    key_path = email_cfg['keyfiles'].get('smtp_key')
     username = email_cfg['smtp_username']
     password = _load_smtp_password(ini_path, key_path)
 
@@ -275,6 +276,34 @@ def _build_sms_summary(results: dict[str, 'StageResult']) -> str | None:
     return '\n'.join(lines)
 
 
+def _ordered_sites_present(rows: list[dict], key: str = 'health_facility_ug') -> list[str]:
+    """
+    Site codes from _UG_SITE_NAMES that actually appear in *rows*, in
+    canonical (not report-order) order. Every weekly/follow-up table and
+    DataFrame builder needs exactly this lookup — previously copy-pasted
+    independently in four places with only the accessed key differing.
+    """
+    return [
+        code for code in _UG_SITE_NAMES
+        if any(str(r.get(key, '')) == code for r in rows)
+    ]
+
+
+def _table_separator(label_w: int, col_w: int, n_sites: int) -> str:
+    """Full-width '─' rule shared by the fixed-width plain-text report tables."""
+    return '─' * (label_w + col_w * n_sites + col_w)
+
+
+def _table_header(label_w: int, col_w: int, site_codes: list[str]) -> str:
+    """'<blank label><site name>...<Total>' header row shared by the
+    fixed-width plain-text report tables."""
+    header = f"{'':>{label_w}}"
+    for code in site_codes:
+        header += f'{_UG_SITE_NAMES.get(code, code):>{col_w}}'
+    header += f'{"Total":>{col_w}}'
+    return header
+
+
 def _build_weekly_sms_table(rows: list[dict], title: str) -> str:
     """
     Build a transposed SMS stats table: sites as columns, weeks+metrics as rows.
@@ -284,11 +313,7 @@ def _build_weekly_sms_table(rows: list[dict], title: str) -> str:
     if not rows:
         return f'{title}\n  No activity.\n'
 
-    # Determine which site codes appear in data, in canonical order
-    all_sites = [
-        code for code in _UG_SITE_NAMES
-        if any(str(r['health_facility_ug']) == code for r in rows)
-    ]
+    all_sites = _ordered_sites_present(rows)
     all_weeks = sorted({r['week'] for r in rows})
 
     # Build lookup: (site_code, week) -> row dict
@@ -301,14 +326,8 @@ def _build_weekly_sms_table(rows: list[dict], title: str) -> str:
     metric_w = 13 # "Delivered    " padded — longest metric label is 9 chars
     label_w = week_w + metric_w  # 22
 
-    sep = '─' * (label_w + col_w * len(all_sites) + col_w)
-
-    # Header row
-    header = f"{'':>{label_w}}"
-    for code in all_sites:
-        name = _UG_SITE_NAMES.get(code, code)
-        header += f'{name:>{col_w}}'
-    header += f'{"Total":>{col_w}}'
+    sep = _table_separator(label_w, col_w, len(all_sites))
+    header = _table_header(label_w, col_w, all_sites)
 
     lines = [title, sep, header, sep]
 
@@ -351,10 +370,7 @@ def _build_weekly_sms_df(rows: list[dict], period_label: str) -> pd.DataFrame:
     if not rows:
         return pd.DataFrame()
 
-    all_sites = [
-        code for code in _UG_SITE_NAMES
-        if any(str(r['health_facility_ug']) == code for r in rows)
-    ]
+    all_sites = _ordered_sites_present(rows)
     site_names = [_UG_SITE_NAMES.get(c, c) for c in all_sites]
     all_weeks = sorted({r['week'] for r in rows})
     lookup = {(str(r['health_facility_ug']), r['week']): r for r in rows}
@@ -496,10 +512,7 @@ def _build_followup_df(rows: list[dict]) -> pd.DataFrame:
     Build follow-up tracking DataFrame: parameters as rows, sites as columns.
     Mirrors the layout of _build_weekly_sms_df.
     """
-    all_sites = [
-        code for code in _UG_SITE_NAMES
-        if any(str(r.get('health_facility_ug', '')) == code for r in rows)
-    ]
+    all_sites = _ordered_sites_present(rows)
     site_names = [_UG_SITE_NAMES.get(c, c) for c in all_sites]
     lookup = {str(r['health_facility_ug']): r for r in rows}
     cols = [''] + site_names + ['Total', '%']
@@ -592,20 +605,13 @@ def _build_followup_table(rows: list[dict]) -> str:
     if not rows:
         return 'Follow-up Tracking\n  No data yet (ds_followup_due not populated).\n'
 
-    all_sites = [
-        code for code in _UG_SITE_NAMES
-        if any(str(r.get('health_facility_ug', '')) == code for r in rows)
-    ]
+    all_sites = _ordered_sites_present(rows)
     lookup = {str(r['health_facility_ug']): r for r in rows}
 
     col_w   = 17
     label_w = 38
-    sep = '─' * (label_w + col_w * len(all_sites) + col_w)
-
-    header = f"{'':>{label_w}}"
-    for code in all_sites:
-        header += f'{_UG_SITE_NAMES.get(code, code):>{col_w}}'
-    header += f'{"Total":>{col_w}}'
+    sep = _table_separator(label_w, col_w, len(all_sites))
+    header = _table_header(label_w, col_w, all_sites)
 
     def site_vals(key: str) -> list[int]:
         return [int(lookup.get(c, {}).get(key, 0)) for c in all_sites]
@@ -755,16 +761,20 @@ def send_sms_flagged_alert(flagged: list[dict], config, engine) -> None:
 
     lines.append(sep)
 
-    # Build resend SQL grouped by week
+    # Build resend commands grouped by week. Routed through `sms.py --resend`
+    # rather than a raw UPDATE statement so every resend is attributed to a
+    # named actor and recorded in sms.resend_log — a raw SQL statement run by
+    # hand leaves no record of who did it or when.
     by_week: dict[int, list[str]] = {}
     for msg in flagged:
         by_week.setdefault(msg['week'], []).append(msg['subjid'])
 
-    lines.append('To resend, run:')
+    lines.append('To resend (fill in --actor with your name — this is logged):')
     for week, subjids in sorted(by_week.items()):
-        id_list = ', '.join(f"'{s}'" for s in subjids)
-        lines.append(f"  UPDATE sms.queue SET status = 'pending'")
-        lines.append(f"  WHERE subjid IN ({id_list}) AND week = {week};")
+        id_list = ' '.join(subjids)
+        lines.append(
+            f'  python sms.py --resend --week {week} --subjid {id_list} --actor "your name"'
+        )
 
     lines.append(sep)
 
