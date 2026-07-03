@@ -37,6 +37,9 @@ logs/
 # Git worktrees
 .worktrees/
 
+# Subagent-driven-development scratch state (progress ledger, briefs, reports)
+.superpowers/
+
 # macOS
 .DS_Store
 
