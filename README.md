@@ -23,6 +23,7 @@ SFTP server → Downloads/ → Extracted/  →  bronze_ibis  →  silver_ibis  �
 | 6 | `PromoteIbis` | Atomically copies all `gold_ibis` tables to the production `ibis` schema. |
 | 7 | `SendSms` | Syncs `sms.queue` from `ibis.baseline`, then sends due SMS messages to Uganda participants via BLASTA. See [SMS.md](SMS.md). |
 | 8 | `StoreIbis` | Appends a dated snapshot of each `ibis` table into `store_ibis` (idempotent — skips if today's snapshot already exists). |
+| — | `ReconcileSilver` | Weekly drift-detection safety net: rebuilds `silver_ibis` from scratch into a throwaway shadow table and diffs it against the live incrementally-maintained table. Never auto-corrects — only reports drift. Deliberately **not** part of `-a`; runs on its own `reconcile_cron` schedule via `python ibis.py -p reconcile_silver`. |
 
 The orchestrator (`ibis.py`) uses a topological sort (Kahn's algorithm) to derive execution order from stage dependencies, and skips downstream stages if an upstream stage fails. Partial success (some tablets failed, others succeeded) is supported — downstream stages run as long as at least one tablet was processed.
 
@@ -85,7 +86,9 @@ The cron schedules are read from `config.json` at container startup. To change t
 docker compose run --rm etl python ibis.py -p <stage_name>
 ```
 
-Valid stage names: `ftp_to_extracted`, `mdb_to_bronze`, `bronze_to_silver`, `transform_ibis`, `measures_ibis`, `promote_ibis`, `send_sms`, `store_ibis`.
+Valid stage names: `ftp_to_extracted`, `mdb_to_bronze`, `bronze_to_silver`, `transform_ibis`, `measures_ibis`, `promote_ibis`, `send_sms`, `store_ibis`, `reconcile_silver`.
+
+`reconcile_silver` is standalone (not reachable via `-a`) — see the table above.
 
 For SMS-specific operations (DLR check, weekly report) see [SMS.md](SMS.md).
 
@@ -171,7 +174,7 @@ The next pipeline run creates (or updates the password of) `ibis_readonly` and g
 | `excluded_tablets` | List of tablet IDs to skip during ingestion |
 | `db` | PostgreSQL connection details (`host`, `port`, `name`, `user`, `password_secret_file`, optional `readonly_password_secret_file` — see [Read-only reporting access](#read-only-reporting-access)) |
 | `trial` | `dedup_key`, `country_code_map` (country → integer countrycode) |
-| `schedule` | `pipeline_cron`, `store_cron`, `dlr_cron`, `sms_weekly_report_cron`, `incentive_report_cron`, `backup_cron` in standard cron format (UTC) |
+| `schedule` | `pipeline_cron`, `store_cron`, `dlr_cron`, `sms_weekly_report_cron`, `incentive_report_cron`, `backup_cron`, `reconcile_cron` in standard cron format (UTC) |
 | `email` | *(optional)* SMTP settings for pipeline notifications — see below |
 
 `password_secret_file` points to the Docker secret mounted at `/run/secrets/db_password` — the password never appears in `config.json` or environment variables.
@@ -254,7 +257,8 @@ The `db_password.txt` file is mounted as a Docker secret (tmpfs inside the conta
 │   ├── measures_ibis.py
 │   ├── promote_ibis.py
 │   ├── send_sms.py          # SMS queue sync + sending (Uganda week-8/11 follow-ups)
-│   └── store_ibis.py
+│   ├── store_ibis.py
+│   └── reconcile_silver.py  # Weekly drift-detection safety net (standalone, not part of -a)
 │
 ├── modules/                 # Shared utilities
 │   ├── access_reader.py     # mdb-export wrapper, tablet snapshot selection
@@ -300,7 +304,7 @@ docker compose run --rm etl python ibis.py -a -v     # verbose logging
 ## Deployment notes
 
 - The `db` service uses a named Docker volume (`pgdata`) so data persists across container restarts.
-- Logs are written inside the container under `/var/log/ibis/`: `pipeline.log`, `store.log`, `dlr.log`, `sms_report.log`, `incentive_report.log`, `backup.log`. Mount a host volume or use `docker compose logs` to access them.
+- Logs are written inside the container under `/var/log/ibis/`: `pipeline.log`, `store.log`, `dlr.log`, `sms_report.log`, `incentive_report.log`, `backup.log`, `reconcile.log`. Mount a host volume or use `docker compose logs` to access them.
 - To change the cron schedule, edit `config.json` and run `docker compose restart etl`.
 - The pipeline is idempotent: re-running after a partial failure will skip already-extracted tablets, already-loaded MDB files, and already-snapshotted store tables.
 - Tablet archives (`.7z`) are deleted from `Downloads/` after successful extraction. The originals on the SFTP server are never modified.

@@ -43,7 +43,8 @@
     "dlr_cron":               "0 12 * * *",
     "sms_weekly_report_cron": "0 10 * * 4",
     "incentive_report_cron":  "0 8 * * 5",
-    "backup_cron":            "0 2 * * *"
+    "backup_cron":            "0 2 * * *",
+    "reconcile_cron":         "0 4 * * 0"
   },
   "email": {
     "smtp_host": "smtp.example.com",

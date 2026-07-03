@@ -25,6 +25,7 @@ from stages.measures_ibis import MeasuresIbis
 from stages.promote_ibis import PromoteIbis
 from stages.store_ibis import StoreIbis
 from stages.send_sms import SendSms
+from stages.reconcile_silver import ReconcileSilver
 
 from modules.notifier import send_pipeline_report
 
@@ -46,6 +47,12 @@ STAGE_CLASSES = {
 }
 
 STAGE_DEPS = {name: cls.dependencies for name, cls in STAGE_CLASSES.items()}
+
+# Stages runnable via -p but deliberately excluded from -a / the dependency
+# graph — they're driven by their own cron schedule, not the nightly run.
+STANDALONE_STAGE_CLASSES = {
+    'reconcile_silver': ReconcileSilver,
+}
 
 # Precomputed once at import time (before any test patches STAGE_CLASSES[x].run)
 # rather than introspected per-call on stage.run — a per-call check against
@@ -94,8 +101,8 @@ def build_run_list(
 ) -> list[str]:
     if run_all:
         return topological_sort(deps)
-    if pipeline not in deps:
-        logger.error(f"Unknown stage '{pipeline}'. Valid stages: {sorted(deps)}")
+    if pipeline not in deps and pipeline not in STANDALONE_STAGE_CLASSES:
+        logger.error(f"Unknown stage '{pipeline}'. Valid stages: {sorted(deps) + sorted(STANDALONE_STAGE_CLASSES)}")
         sys.exit(1)
     return [pipeline]
 
@@ -107,7 +114,7 @@ def run_pipeline(
     failed: set[str] = set()
 
     for name in stages:
-        cls = STAGE_CLASSES[name]
+        cls = STAGE_CLASSES.get(name) or STANDALONE_STAGE_CLASSES[name]
         blocked_by = [d for d in cls.dependencies if d in failed]
         if blocked_by:
             logger.warning(f"Skipping '{name}' — upstream failure(s): {blocked_by}")
@@ -117,7 +124,7 @@ def run_pipeline(
         logger.info(f"=== Running stage: {name} ===")
         stage = cls(config=config, engine=engine)
         try:
-            if full_rebuild and STAGE_ACCEPTS_FULL_REBUILD[name]:
+            if full_rebuild and STAGE_ACCEPTS_FULL_REBUILD.get(name, False):
                 result = stage.run(full_rebuild=True)
             else:
                 result = stage.run()
