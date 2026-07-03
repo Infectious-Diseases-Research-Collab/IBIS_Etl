@@ -47,6 +47,15 @@ STAGE_CLASSES = {
 
 STAGE_DEPS = {name: cls.dependencies for name, cls in STAGE_CLASSES.items()}
 
+# Precomputed once at import time (before any test patches STAGE_CLASSES[x].run)
+# rather than introspected per-call on stage.run — a per-call check against
+# stage.run.__code__ breaks when tests mock run via patch.object(), since
+# MagicMock doesn't fabricate a real __code__ matching the original function.
+STAGE_ACCEPTS_FULL_REBUILD = {
+    name: 'full_rebuild' in cls.run.__code__.co_varnames
+    for name, cls in STAGE_CLASSES.items()
+}
+
 # Shared across `-a` and `-p <stage>` invocations — a single-stage run (e.g.
 # store_ibis) still touches schemas a full run writes to, so both must be
 # serialised against each other, not just against themselves.
@@ -91,7 +100,9 @@ def build_run_list(
     return [pipeline]
 
 
-def run_pipeline(stages: list[str], config: ConfigLoader, engine) -> None:
+def run_pipeline(
+    stages: list[str], config: ConfigLoader, engine, full_rebuild: bool = False
+) -> None:
     results: dict[str, StageResult] = {}
     failed: set[str] = set()
 
@@ -106,7 +117,10 @@ def run_pipeline(stages: list[str], config: ConfigLoader, engine) -> None:
         logger.info(f"=== Running stage: {name} ===")
         stage = cls(config=config, engine=engine)
         try:
-            result = stage.run()
+            if full_rebuild and STAGE_ACCEPTS_FULL_REBUILD[name]:
+                result = stage.run(full_rebuild=True)
+            else:
+                result = stage.run()
         except Exception as exc:
             result = StageResult(success=False, errors=[str(exc)])
             logger.exception(f"Stage '{name}' raised an unexpected exception.")
@@ -160,6 +174,11 @@ def main() -> None:
     parser.add_argument('-p', '--pipeline', help='Run a single named stage')
     parser.add_argument('-a', '--all', action='store_true', help='Run all stages')
     parser.add_argument('-v', '--verbose', action='store_true')
+    parser.add_argument(
+        '--full-rebuild', action='store_true',
+        help='Recovery path: re-clean ALL of bronze from scratch instead of '
+             'only new files (bronze_to_silver only; other stages ignore this).',
+    )
     args = parser.parse_args()
 
     if args.verbose:
@@ -179,7 +198,7 @@ def main() -> None:
             _maybe_init_readonly_role(config, engine)
 
             stages = build_run_list(STAGE_DEPS, run_all=args.all, pipeline=args.pipeline)
-            run_pipeline(stages, config, engine)
+            run_pipeline(stages, config, engine, full_rebuild=args.full_rebuild)
     except PipelineLockError as exc:
         logger.error(str(exc))
         sys.exit(1)

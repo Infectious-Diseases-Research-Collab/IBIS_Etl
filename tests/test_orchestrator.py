@@ -146,3 +146,35 @@ def test_run_pipeline_calls_notifier_on_success():
             run_pipeline(['mdb_to_bronze'], config, engine)
 
     mock_notify.assert_called_once()
+
+
+def test_run_pipeline_passes_full_rebuild_to_stages_that_accept_it():
+    from unittest.mock import MagicMock, patch
+    from stages.base import StageResult
+    from ibis import run_pipeline, STAGE_CLASSES
+
+    config = MagicMock()
+    engine = MagicMock()
+
+    with patch.object(STAGE_CLASSES['bronze_to_silver'], 'run',
+                      return_value=StageResult(success=True)) as mock_run:
+        with patch('ibis.send_pipeline_report'):
+            run_pipeline(['bronze_to_silver'], config, engine, full_rebuild=True)
+
+    mock_run.assert_called_once_with(full_rebuild=True)
+
+
+def test_run_pipeline_full_rebuild_ignored_by_stages_without_the_kwarg():
+    from unittest.mock import MagicMock, patch
+    from stages.base import StageResult
+    from ibis import run_pipeline, STAGE_CLASSES
+
+    config = MagicMock()
+    engine = MagicMock()
+
+    with patch.object(STAGE_CLASSES['mdb_to_bronze'], 'run',
+                      return_value=StageResult(success=True)) as mock_run:
+        with patch('ibis.send_pipeline_report'):
+            run_pipeline(['mdb_to_bronze'], config, engine, full_rebuild=True)
+
+    mock_run.assert_called_once_with()
