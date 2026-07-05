@@ -1,5 +1,8 @@
 import pandas as pd
+import pytest
 from unittest.mock import MagicMock, patch
+
+from sqlalchemy.exc import ProgrammingError
 
 from stages.mdb_to_bronze import MdbToBronze, _ingest_file, _process_mdb_file
 
@@ -20,7 +23,6 @@ def _make_config(access_table_name='baseline'):
 def _mock_engine_for_ingest():
     """Engine whose meta-check and column-lookup queries both raise
     ProgrammingError (bronze_ibis tables don't exist yet)."""
-    from sqlalchemy.exc import ProgrammingError
     engine = MagicMock()
 
     connect_ctx = MagicMock()
@@ -76,6 +78,51 @@ def test_ingest_file_writes_table_name_to_meta():
 
     assert 'table_name' in captured['meta_df'].columns
     assert captured['meta_df']['table_name'].iloc[0] == 'followup'
+
+
+def test_ingest_file_retries_once_on_concurrent_table_creation_race():
+    """Two concurrent workers can both see bronze_ibis.<table> as absent and
+    both attempt to create it via to_sql's lazy CREATE — the loser must
+    retry once (by which point the winner's CREATE has committed) rather
+    than propagate the duplicate-table error and quarantine a healthy file."""
+    engine = _mock_engine_for_ingest()
+    raw = pd.DataFrame({'uniqueid': ['x']})
+
+    call_count = {'n': 0}
+
+    def flaky_to_sql(self, name, conn, schema=None, **kwargs):
+        call_count['n'] += 1
+        if call_count['n'] == 1 and name == 'baseline':
+            orig = MagicMock()
+            orig.pgcode = '42P07'
+            raise ProgrammingError('CREATE TABLE ...', {}, orig)
+
+    with patch('stages.mdb_to_bronze.read_mdb_table', return_value=raw), \
+         patch('os.path.getmtime', return_value=0.0), \
+         patch.object(pd.DataFrame, 'to_sql', flaky_to_sql):
+        rows = _ingest_file(engine, '/fake/tablet.mdb', 'baseline', 'uganda', 'Mbarara')
+
+    assert rows == 1
+    assert call_count['n'] > 2  # first attempt's baseline call, then retry's baseline+meta calls
+
+
+def test_ingest_file_reraises_non_race_programming_errors():
+    """A ProgrammingError NOT caused by the concurrent-create race (e.g. a
+    genuine SQL syntax error) must propagate normally, not be silently
+    retried/swallowed."""
+    engine = _mock_engine_for_ingest()
+    raw = pd.DataFrame({'uniqueid': ['x']})
+
+    def broken_to_sql(self, name, conn, schema=None, **kwargs):
+        orig = MagicMock()
+        orig.pgcode = '42601'  # syntax_error — unrelated to the create-table race
+        raise ProgrammingError('bad SQL', {}, orig)
+
+    with patch('stages.mdb_to_bronze.read_mdb_table', return_value=raw), \
+         patch('os.path.getmtime', return_value=0.0), \
+         patch.object(pd.DataFrame, 'to_sql', broken_to_sql):
+        with pytest.raises(ProgrammingError):
+            _ingest_file(engine, '/fake/tablet.mdb', 'baseline', 'uganda', 'Mbarara')
 
 
 # ---------------------------------------------------------------------------

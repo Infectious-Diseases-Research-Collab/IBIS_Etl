@@ -41,6 +41,15 @@ def _quarantine_tablet(tablet_folder: str, extract_path: str) -> str:
     return dest
 
 
+def _is_duplicate_table_error(exc: ProgrammingError) -> bool:
+    """True if exc wraps Postgres's duplicate_table error (SQLSTATE 42P07) —
+    the race that occurs when two concurrent workers both see a bronze_ibis
+    table as missing and both attempt to create it via to_sql's lazy CREATE."""
+    orig = getattr(exc, 'orig', None)
+    pgcode = getattr(orig, 'pgcode', None)
+    return pgcode == '42P07'
+
+
 def _ingest_file(
     engine,
     db_path: str,
@@ -106,9 +115,20 @@ def _ingest_file(
         'last_modified': last_modified,
         'loaded': True,
     }])
-    with engine.begin() as conn:
-        df.to_sql(table_name, conn, schema='bronze_ibis', if_exists='append', index=False)
-        meta.to_sql('meta', conn, schema='bronze_ibis', if_exists='append', index=False)
+    for attempt in range(2):
+        try:
+            with engine.begin() as conn:
+                df.to_sql(table_name, conn, schema='bronze_ibis', if_exists='append', index=False)
+                meta.to_sql('meta', conn, schema='bronze_ibis', if_exists='append', index=False)
+            break
+        except ProgrammingError as exc:
+            if attempt == 0 and _is_duplicate_table_error(exc):
+                logger.warning(
+                    f"Concurrent table creation race for bronze_ibis.{table_name}/meta "
+                    f"— retrying insert for '{os.path.basename(db_path)}'."
+                )
+                continue
+            raise
 
     logger.info(
         f"Ingested {len(df)} rows from '{os.path.basename(db_path)}'"
