@@ -44,10 +44,24 @@ def _month_bounds(for_date: date) -> tuple[date, date]:
     return start, end
 
 
-def ensure_month_partition(conn, schema: str, table: str, for_date: date) -> None:
+def ensure_month_partition(
+    conn, schema: str, table: str, for_date: date, *, name_as: str | None = None
+) -> None:
     """
     Create the monthly partition of schema.table covering for_date's month,
     if it doesn't already exist. Idempotent — safe to call on every run.
+
+    name_as: if given, the partition is NAMED using this table instead of
+    *table* (which is still the PARTITION OF attach target). Needed by
+    migrate_to_partitioned: during migration, partitions must be attached
+    to the temporary "_new_<table>" table, but Postgres does NOT rename
+    child partitions when the parent is later renamed in the blue-green
+    swap — so a partition's name must already match the post-swap live
+    table's naming convention *before* the swap happens, or the next
+    ordinary call to ensure_month_partition(conn, schema, table, ...) for
+    an already-migrated month will try to create a same-range partition
+    under the correct name and fail with a Postgres "partition would
+    overlap" error against the wrongly-named one left behind by migration.
 
     Partition boundaries are embedded as date literals (not bound
     parameters): they're computed purely from *for_date* (a date object,
@@ -58,8 +72,12 @@ def ensure_month_partition(conn, schema: str, table: str, for_date: date) -> Non
     """
     _validate_table_name(schema)
     _validate_table_name(table)
+    naming_table = table
+    if name_as is not None:
+        _validate_table_name(name_as)
+        naming_table = name_as
     start, end = _month_bounds(for_date)
-    partition_name = f"{table}_y{start.year}_m{start.month:02d}"
+    partition_name = f"{naming_table}_y{start.year}_m{start.month:02d}"
     conn.execute(text(f"""
         CREATE TABLE IF NOT EXISTS {schema}."{partition_name}"
         PARTITION OF {schema}."{table}"
@@ -119,7 +137,7 @@ def migrate_to_partitioned(conn, schema: str, table: str, partition_col: str) ->
         f'FROM {schema}."{table}"'
     )).fetchall()
     for (month_start,) in months:
-        ensure_month_partition(conn, schema, new_table, month_start)
+        ensure_month_partition(conn, schema, new_table, month_start, name_as=table)
 
     conn.execute(text(
         f'INSERT INTO {schema}."{new_table}" ({insert_col_list}) '

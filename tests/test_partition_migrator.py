@@ -59,6 +59,24 @@ def test_ensure_month_partition_rejects_invalid_schema_name():
         ensure_month_partition(conn, 'bad;schema', 'baseline', date(2026, 1, 1))
 
 
+def test_ensure_month_partition_name_as_overrides_partition_naming_only():
+    """name_as changes what the partition is NAMED, not what it's attached
+    to — PARTITION OF must still target the table actually passed in."""
+    conn = MagicMock()
+    ensure_month_partition(conn, 'store_ibis', '_new_baseline', date(2026, 1, 15), name_as='baseline')
+
+    executed_sql = str(conn.execute.call_args[0][0])
+    assert '"baseline_y2026_m01"' in executed_sql
+    assert 'PARTITION OF store_ibis."_new_baseline"' in executed_sql
+    assert '_new_baseline_y2026_m01' not in executed_sql
+
+
+def test_ensure_month_partition_rejects_invalid_name_as():
+    conn = MagicMock()
+    with pytest.raises(ValueError, match="Invalid table name"):
+        ensure_month_partition(conn, 'store_ibis', 'baseline', date(2026, 1, 1), name_as='bad;name')
+
+
 # ---------------------------------------------------------------------------
 # migrate_to_partitioned
 # ---------------------------------------------------------------------------
@@ -95,12 +113,42 @@ def test_migrate_to_partitioned_creates_partitions_copies_and_swaps():
         for s in executed_sql
     )
     assert any('"snapshot_date" DATE NOT NULL' in s for s in executed_sql)
-    assert any('baseline_y2026_m01' in s for s in executed_sql)
-    assert any('baseline_y2026_m02' in s for s in executed_sql)
+    # Exact quoted-identifier match, not a loose substring check: the
+    # naive `'baseline_y2026_m01' in s` would also match inside
+    # `"_new_baseline_y2026_m01"` and silently pass even if partitions
+    # were (wrongly) named after the temporary _new_ table.
+    assert any('"baseline_y2026_m01"' in s for s in executed_sql)
+    assert any('"baseline_y2026_m02"' in s for s in executed_sql)
     assert any('INSERT INTO store_ibis."_new_baseline"' in s for s in executed_sql)
     assert any('RENAME TO "_old_baseline"' in s for s in executed_sql)
     assert any('"_new_baseline" RENAME TO "baseline"' in s for s in executed_sql)
     assert any('DROP TABLE store_ibis."_old_baseline"' in s for s in executed_sql)
+
+
+def test_migrate_to_partitioned_names_partitions_after_final_table_not_temp_table():
+    """Partitions created during migration must be named using the FINAL
+    table name (e.g. "baseline_y2026_m01"), never the temporary
+    "_new_baseline" table they're attached to during migration — Postgres
+    does not rename child partitions when the parent is renamed in the
+    blue-green swap, so a wrong name here would be permanent and would
+    make the very next ordinary ensure_month_partition(..., 'baseline',
+    ...) call for that month fail with a Postgres partition-overlap error
+    against the wrongly-named leftover."""
+    conn = MagicMock()
+    conn.execute.side_effect = _fake_execute_for_migration(
+        columns=[('uniqueid', 'text'), ('snapshot_date', 'text')],
+        months=[date(2026, 1, 1)],
+        old_count=5, new_count=5,
+    )
+
+    migrate_to_partitioned(conn, 'store_ibis', 'baseline', 'snapshot_date')
+
+    executed_sql = [str(c.args[0]) for c in conn.execute.call_args_list]
+    assert any(
+        '"baseline_y2026_m01"' in s and 'PARTITION OF store_ibis."_new_baseline"' in s
+        for s in executed_sql
+    )
+    assert not any('_new_baseline_y2026_m01' in s for s in executed_sql)
 
 
 def test_migrate_to_partitioned_aborts_without_swapping_on_row_count_mismatch():
