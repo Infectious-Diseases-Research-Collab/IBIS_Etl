@@ -6,6 +6,7 @@ from datetime import date
 
 from sqlalchemy import text
 
+from modules.partition_migrator import ensure_month_partition, is_partitioned, migrate_to_partitioned
 from stages.base import BaseStage, StageResult
 
 logger = logging.getLogger(__name__)
@@ -23,16 +24,15 @@ class StoreIbis(BaseStage):
     dependencies: list[str] = ['promote_ibis']
 
     def run(self) -> StageResult:
-        snapshot_date = date.today().isoformat()
+        today = date.today()
         errors: list[str] = []
         tables: list[str] = []
 
-        # The inner raise (in _snapshot_table) aborts the transaction on the
-        # first failing table and rolls back via engine.begin(). The outer
-        # except exists only to get back to the return below with *errors*
-        # and *tables* populated — letting the exception propagate to the
-        # caller would report just the bare exception, discarding which
-        # table failed and how many were even discovered.
+        # See transform_ibis.py for why this is try/except-wrapped rather
+        # than left to propagate: the inner raise aborts the transaction on
+        # the first failing table, and the outer except gets back to the
+        # return below with *errors* and *tables* populated instead of
+        # losing that detail to a bare caught-and-rewrapped exception upstream.
         try:
             with self.engine.begin() as conn:
                 rows = conn.execute(
@@ -45,12 +45,12 @@ class StoreIbis(BaseStage):
                 tables = [r[0] for r in rows]
                 logger.info(
                     f"Snapshotting {len(tables)} table(s) from ibis → store_ibis "
-                    f"(snapshot_date={snapshot_date})."
+                    f"(snapshot_date={today.isoformat()})."
                 )
 
                 for table in tables:
                     try:
-                        self._snapshot_table(conn, table, snapshot_date)
+                        self._snapshot_table(conn, table, today)
                     except Exception as exc:
                         msg = f"Failed to snapshot '{table}': {exc}"
                         logger.error(msg)
@@ -66,23 +66,31 @@ class StoreIbis(BaseStage):
             errors=errors,
         )
 
-    def _snapshot_table(self, conn, table: str, snapshot_date: str) -> None:
-        """Append today's snapshot of ibis.<table> to store_ibis.<table>,
-        skipping if already complete and repairing an incomplete prior
-        attempt for the same date."""
+    def _snapshot_table(self, conn, table: str, today: date) -> None:
+        """Append today's snapshot of ibis.<table> to store_ibis.<table>
+        (a table partitioned monthly by snapshot_date), skipping if already
+        complete and repairing an incomplete prior attempt for the same date.
+        A brand-new table is created directly as partitioned; an existing
+        unpartitioned table is migrated once, automatically."""
         _validate_table_name(table)
 
-        conn.execute(text(
-            f'CREATE TABLE IF NOT EXISTS store_ibis."{table}" AS '
-            f'SELECT *, CURRENT_DATE::text AS snapshot_date '
-            f'FROM ibis."{table}" WHERE FALSE'
-        ))
+        exists = conn.execute(text(
+            "SELECT 1 FROM information_schema.tables "
+            "WHERE table_schema = 'store_ibis' AND table_name = :t"
+        ), {'t': table}).scalar()
+
+        if not exists:
+            self._create_partitioned_table(conn, table)
+        elif not is_partitioned(conn, 'store_ibis', table):
+            logger.warning(f"  Migrating store_ibis.{table} to a partitioned table...")
+            migrate_to_partitioned(conn, 'store_ibis', table, 'snapshot_date')
+            logger.info(f"  Migration complete: store_ibis.{table} is now partitioned.")
+
+        ensure_month_partition(conn, 'store_ibis', table, today)
+
         snapshot_count = conn.execute(
-            text(
-                f'SELECT COUNT(*) FROM store_ibis."{table}" '
-                f'WHERE snapshot_date = :d'
-            ),
-            {'d': snapshot_date},
+            text(f'SELECT COUNT(*) FROM store_ibis."{table}" WHERE snapshot_date = :d'),
+            {'d': today},
         ).scalar()
         source_count = conn.execute(
             text(f'SELECT COUNT(*) FROM ibis."{table}"')
@@ -91,7 +99,7 @@ class StoreIbis(BaseStage):
         if snapshot_count == source_count and snapshot_count > 0:
             logger.info(
                 f"  Skipping store_ibis.{table} — already snapshotted today "
-                f"({snapshot_date}, {snapshot_count} rows)."
+                f"({today.isoformat()}, {snapshot_count} rows)."
             )
             return
 
@@ -102,11 +110,26 @@ class StoreIbis(BaseStage):
             )
             conn.execute(text(
                 f'DELETE FROM store_ibis."{table}" WHERE snapshot_date = :d'
-            ), {'d': snapshot_date})
+            ), {'d': today})
 
         conn.execute(text(
-            f"INSERT INTO store_ibis.\"{table}\" "
-            f"SELECT *, '{snapshot_date}' AS snapshot_date "
-            f'FROM ibis."{table}"'
-        ))
+            f'INSERT INTO store_ibis."{table}" SELECT *, :d AS snapshot_date FROM ibis."{table}"'
+        ), {'d': today})
         logger.info(f"  Snapshotted: ibis.{table} → store_ibis.{table}")
+
+    def _create_partitioned_table(self, conn, table: str) -> None:
+        """Create store_ibis.<table> for the first time, directly as a table
+        partitioned monthly by snapshot_date — mirrors ibis.<table>'s current
+        columns, same as the old CREATE TABLE ... AS SELECT ... WHERE FALSE
+        trick, but with an explicit PARTITION BY clause and a proper DATE
+        snapshot_date column (the old version cast it to text)."""
+        cols = conn.execute(text(
+            "SELECT column_name, data_type FROM information_schema.columns "
+            "WHERE table_schema = 'ibis' AND table_name = :t ORDER BY ordinal_position"
+        ), {'t': table}).fetchall()
+        col_defs = ', '.join(f'"{c}" {t}' for c, t in cols)
+        conn.execute(text(
+            f'CREATE TABLE store_ibis."{table}" ({col_defs}, snapshot_date DATE NOT NULL) '
+            f'PARTITION BY RANGE (snapshot_date)'
+        ))
+        logger.info(f"  Created store_ibis.{table} as a new partitioned table.")
