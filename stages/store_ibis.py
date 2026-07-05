@@ -6,10 +6,31 @@ from datetime import date
 
 from sqlalchemy import text
 
-from modules.partition_migrator import ensure_month_partition, is_partitioned, migrate_to_partitioned
+from modules.partition_migrator import (
+    ensure_month_partition,
+    is_partitioned,
+    migrate_to_partitioned,
+    retire_old_partitions,
+)
 from stages.base import BaseStage, StageResult
 
 logger = logging.getLogger(__name__)
+
+RETENTION_MONTHS = 12
+ARCHIVE_DIR = '/app/backups/store_ibis_archive'
+
+
+def _cutoff_month(today: date, months: int) -> date:
+    """First day of the month `months` calendar months before today's month.
+
+    Built via today.replace(...) rather than the bare date(...) constructor
+    so this keeps working when callers patch the module-level `date` symbol
+    (as stages/store_ibis's own tests do to freeze date.today()) — replace()
+    is an instance method resolved on the real `today` object, not a lookup
+    of the (possibly patched) class."""
+    month_index = (today.year * 12 + (today.month - 1)) - months
+    year, month = divmod(month_index, 12)
+    return today.replace(year=year, month=month + 1, day=1)
 
 
 def _validate_table_name(name: str) -> str:
@@ -87,6 +108,11 @@ class StoreIbis(BaseStage):
             logger.info(f"  Migration complete: store_ibis.{table} is now partitioned.")
 
         ensure_month_partition(conn, 'store_ibis', table, today)
+
+        cutoff = _cutoff_month(today, RETENTION_MONTHS)
+        retired = retire_old_partitions(conn, 'store_ibis', table, cutoff, ARCHIVE_DIR)
+        if retired:
+            logger.info(f"  Retired {len(retired)} partition(s) for store_ibis.{table}: {retired}")
 
         snapshot_count = conn.execute(
             text(f'SELECT COUNT(*) FROM store_ibis."{table}" WHERE snapshot_date = :d'),

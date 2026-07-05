@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import gzip
 import logging
+import os
 import re
 from datetime import date
 
@@ -159,3 +161,65 @@ def migrate_to_partitioned(conn, schema: str, table: str, partition_col: str) ->
         f"Migrated {schema}.{table} to a partitioned table "
         f"({len(months)} partition(s), {new_count} row(s))."
     )
+
+
+def archive_partition(conn, schema: str, table: str, archive_dir: str) -> str:
+    """
+    Export every row of schema.table (a retiring partition) to a
+    gzip-compressed CSV file under archive_dir before it's dropped.
+    Returns the file path written. Streams directly through the
+    underlying psycopg2 connection's COPY support — no pandas round-trip
+    needed for what may be a full year of daily snapshots.
+    """
+    _validate_table_name(schema)
+    _validate_table_name(table)
+    os.makedirs(archive_dir, exist_ok=True)
+    file_path = os.path.join(archive_dir, f'{schema}.{table}.csv.gz')
+    cursor = conn.connection.cursor()
+    with gzip.open(file_path, 'wt', newline='') as f:
+        cursor.copy_expert(
+            f'COPY {schema}."{table}" TO STDOUT WITH CSV HEADER', f
+        )
+    logger.info(f"Archived {schema}.{table} → {file_path}")
+    return file_path
+
+
+def retire_old_partitions(
+    conn, schema: str, table: str, cutoff_month: date, archive_dir: str
+) -> list[str]:
+    """
+    Find monthly partitions of schema.table (named "<table>_yYYYY_mMM" by
+    ensure_month_partition/migrate_to_partitioned) whose month is strictly
+    before cutoff_month, archive each to archive_dir, then drop it. Returns
+    the list of retired partition names, in the order found. A child table
+    that doesn't match the naming convention (e.g. a manually created one)
+    is left untouched rather than guessed at.
+    """
+    _validate_table_name(schema)
+    _validate_table_name(table)
+
+    partitions = conn.execute(text("""
+        SELECT child.relname
+        FROM pg_inherits i
+        JOIN pg_class child ON child.oid = i.inhrelid
+        JOIN pg_class parent ON parent.oid = i.inhparent
+        JOIN pg_namespace n ON n.oid = parent.relnamespace
+        WHERE n.nspname = :schema AND parent.relname = :table
+    """), {'schema': schema, 'table': table}).fetchall()
+
+    pattern = re.compile(rf'^{re.escape(table)}_y(\d{{4}})_m(\d{{2}})$')
+    retired: list[str] = []
+    for (partition_name,) in partitions:
+        match = pattern.match(partition_name)
+        if not match:
+            continue
+        partition_month = date(int(match.group(1)), int(match.group(2)), 1)
+        if partition_month < cutoff_month:
+            archive_partition(conn, schema, partition_name, archive_dir)
+            conn.execute(text(f'DROP TABLE {schema}."{partition_name}"'))
+            retired.append(partition_name)
+            logger.info(
+                f"Retired partition {schema}.{partition_name} "
+                f"(older than {cutoff_month.isoformat()})."
+            )
+    return retired

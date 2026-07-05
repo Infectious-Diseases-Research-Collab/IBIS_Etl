@@ -1,11 +1,18 @@
 from __future__ import annotations
 
+import os
 from datetime import date
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 import pytest
 
-from modules.partition_migrator import ensure_month_partition, is_partitioned, migrate_to_partitioned
+from modules.partition_migrator import (
+    archive_partition,
+    ensure_month_partition,
+    is_partitioned,
+    migrate_to_partitioned,
+    retire_old_partitions,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -188,3 +195,114 @@ def test_migrate_to_partitioned_rejects_invalid_identifiers():
     conn = MagicMock()
     with pytest.raises(ValueError, match="Invalid table name"):
         migrate_to_partitioned(conn, 'store_ibis', 'bad;name', 'snapshot_date')
+
+
+# ---------------------------------------------------------------------------
+# archive_partition
+# ---------------------------------------------------------------------------
+
+def test_archive_partition_writes_gzip_csv_via_copy(tmp_path):
+    conn = MagicMock()
+    cursor = MagicMock()
+    conn.connection.cursor.return_value = cursor
+
+    archive_dir = str(tmp_path)
+    file_path = archive_partition(conn, 'store_ibis', 'baseline_y2025_m01', archive_dir)
+
+    assert file_path == os.path.join(archive_dir, 'store_ibis.baseline_y2025_m01.csv.gz')
+    assert os.path.exists(file_path)
+    cursor.copy_expert.assert_called_once()
+    copy_sql = cursor.copy_expert.call_args[0][0]
+    assert 'COPY store_ibis."baseline_y2025_m01" TO STDOUT WITH CSV HEADER' in copy_sql
+
+
+def test_archive_partition_creates_archive_dir_if_missing(tmp_path):
+    conn = MagicMock()
+    conn.connection.cursor.return_value = MagicMock()
+
+    archive_dir = str(tmp_path / 'nested' / 'archive')
+    file_path = archive_partition(conn, 'store_ibis', 'baseline_y2025_m01', archive_dir)
+
+    assert os.path.exists(file_path)
+
+
+def test_archive_partition_rejects_invalid_identifiers(tmp_path):
+    conn = MagicMock()
+    with pytest.raises(ValueError, match="Invalid table name"):
+        archive_partition(conn, 'store_ibis', 'bad;name', str(tmp_path))
+
+
+# ---------------------------------------------------------------------------
+# retire_old_partitions
+# ---------------------------------------------------------------------------
+
+def test_retire_old_partitions_archives_and_drops_only_out_of_window_months():
+    conn = MagicMock()
+
+    def fake_execute(clause, params=None):
+        sql = str(clause)
+        result = MagicMock()
+        if 'pg_inherits' in sql:
+            result.fetchall.return_value = [
+                ('baseline_y2024_m06',),  # older than cutoff -> retire
+                ('baseline_y2025_m01',),  # exactly at cutoff -> keep
+                ('baseline_custom',),     # doesn't match naming convention -> ignore
+            ]
+        return result
+
+    conn.execute.side_effect = fake_execute
+
+    with patch('modules.partition_migrator.archive_partition') as mock_archive:
+        retired = retire_old_partitions(
+            conn, 'store_ibis', 'baseline', date(2025, 1, 1), '/app/backups/store_ibis_archive'
+        )
+
+    assert retired == ['baseline_y2024_m06']
+    mock_archive.assert_called_once_with(
+        conn, 'store_ibis', 'baseline_y2024_m06', '/app/backups/store_ibis_archive'
+    )
+
+    executed_sql = [str(c.args[0]) for c in conn.execute.call_args_list]
+    assert any('DROP TABLE store_ibis."baseline_y2024_m06"' in s for s in executed_sql)
+    assert not any('DROP TABLE store_ibis."baseline_y2025_m01"' in s for s in executed_sql)
+    assert not any('DROP TABLE store_ibis."baseline_custom"' in s for s in executed_sql)
+
+
+def test_retire_old_partitions_returns_empty_list_when_nothing_eligible():
+    conn = MagicMock()
+    conn.execute.return_value.fetchall.return_value = [('baseline_y2026_m01',)]
+
+    with patch('modules.partition_migrator.archive_partition') as mock_archive:
+        retired = retire_old_partitions(
+            conn, 'store_ibis', 'baseline', date(2025, 1, 1), '/app/backups/store_ibis_archive'
+        )
+
+    assert retired == []
+    mock_archive.assert_not_called()
+
+
+def test_retire_old_partitions_archives_before_dropping():
+    """The archive call must happen before the DROP TABLE for the same
+    partition — never the reverse order."""
+    conn = MagicMock()
+    call_order = []
+    conn.execute.side_effect = lambda clause, params=None: (
+        call_order.append('pg_inherits') if 'pg_inherits' in str(clause)
+        else call_order.append('drop') if 'DROP TABLE' in str(clause)
+        else None
+    ) or MagicMock(fetchall=MagicMock(return_value=[('baseline_y2024_m06',)]))
+
+    def fake_archive(conn_arg, schema, table, archive_dir):
+        call_order.append('archive')
+        return '/fake/path.csv.gz'
+
+    with patch('modules.partition_migrator.archive_partition', side_effect=fake_archive):
+        retire_old_partitions(conn, 'store_ibis', 'baseline', date(2025, 1, 1), '/app/backups/store_ibis_archive')
+
+    assert call_order.index('archive') < call_order.index('drop')
+
+
+def test_retire_old_partitions_rejects_invalid_identifiers():
+    conn = MagicMock()
+    with pytest.raises(ValueError, match="Invalid table name"):
+        retire_old_partitions(conn, 'store_ibis', 'bad;name', date(2025, 1, 1), '/app/backups')

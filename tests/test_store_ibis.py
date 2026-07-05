@@ -1,7 +1,7 @@
 from unittest.mock import MagicMock, patch
 from datetime import date
 
-from stages.store_ibis import StoreIbis
+from stages.store_ibis import StoreIbis, _cutoff_month
 
 
 def _make_engine(execute_side_effect):
@@ -185,3 +185,29 @@ def test_store_ibis_reports_formatted_error_not_bare_exception():
     assert len(result.errors) == 1
     assert "Failed to snapshot 'd_participant'" in result.errors[0]
     assert 'disk full' in result.errors[0]
+
+
+def test_cutoff_month_twelve_months_back():
+    assert _cutoff_month(date(2026, 4, 13), 12) == date(2025, 4, 1)
+
+
+def test_cutoff_month_handles_year_rollover():
+    assert _cutoff_month(date(2026, 3, 5), 12) == date(2025, 3, 1)
+    assert _cutoff_month(date(2026, 1, 5), 12) == date(2025, 1, 1)
+
+
+def test_store_ibis_retires_partitions_past_retention_window():
+    engine, mock_conn = _make_engine(_base_side_effect(store_exists=True))
+    stage = StoreIbis(config=MagicMock(), engine=engine)
+
+    with patch('stages.store_ibis.date') as mock_date:
+        mock_date.today.return_value = date(2026, 4, 13)
+        with patch('stages.store_ibis.is_partitioned', return_value=True), \
+             patch('stages.store_ibis.ensure_month_partition'), \
+             patch('stages.store_ibis.retire_old_partitions', return_value=['d_participant_y2025_m03']) as mock_retire:
+            result = stage.run()
+
+    assert result.success
+    mock_retire.assert_called_once_with(
+        mock_conn, 'store_ibis', 'd_participant', date(2025, 4, 1), '/app/backups/store_ibis_archive'
+    )
