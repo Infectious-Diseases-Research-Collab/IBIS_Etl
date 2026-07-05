@@ -27,6 +27,12 @@ SFTP server → Downloads/ → Extracted/  →  bronze_ibis  →  silver_ibis  �
 
 The orchestrator (`ibis.py`) uses a topological sort (Kahn's algorithm) to derive execution order from stage dependencies, and skips downstream stages if an upstream stage fails. Partial success (some tablets failed, others succeeded) is supported — downstream stages run as long as at least one tablet was processed.
 
+### `store_ibis` — Partitioning and Retention
+
+`store_ibis` tables are partitioned monthly by `snapshot_date` (native Postgres `PARTITION BY RANGE`), not a single ever-growing table. An existing unpartitioned `store_ibis.<table>` is migrated automatically and losslessly the first time `store_ibis` runs after this change — no manual step, no downtime — via the same create-new/verify-row-count/rename blue-green pattern `promote_ibis` already uses. Snapshots older than 1 year are retired automatically: each retiring partition is exported to a gzip CSV under `/app/backups/store_ibis_archive/` (same volume `scripts/backup_db.sh` already uses) *before* being dropped — see `docs/superpowers/specs/2026-07-03-store-ibis-partitioning-design.md` for the full retention design.
+
+**Before deploying this to a production database for the first time:** run `docker compose run --rm etl python ibis.py -p store_ibis` once against a copy of production data (or at minimum the largest `store_ibis` table) to confirm the migration completes within an acceptable time, that the row-count verification behaves as expected, and that the number of partitions archived/dropped on the first run matches how much data is actually older than 1 year — the migration copies every existing snapshot row into a new table structure before the automatic swap, and any pre-existing snapshots older than a year will be archived and dropped on that same first run.
+
 ---
 
 ## Incremental Processing & History Tracking
