@@ -5,6 +5,7 @@ import logging
 import os
 import shutil
 import uuid
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
 
 import pandas as pd
@@ -16,6 +17,8 @@ from modules.config import get_country_paths
 from stages.base import BaseStage, StageResult
 
 logger = logging.getLogger(__name__)
+
+_MAX_WORKERS = 4
 
 
 def _quarantine_tablet(tablet_folder: str, extract_path: str) -> str:
@@ -38,13 +41,159 @@ def _quarantine_tablet(tablet_folder: str, extract_path: str) -> str:
     return dest
 
 
+def _ingest_file(
+    engine,
+    db_path: str,
+    table_name: str,
+    country: str,
+    community: str,
+) -> int:
+    """Load one MDB table from an MDB file into bronze_ibis.<table_name>. Returns rows written."""
+    last_modified = datetime.fromtimestamp(os.path.getmtime(db_path), tz=timezone.utc)
+
+    try:
+        with engine.connect() as conn:
+            row = conn.execute(
+                text(
+                    "SELECT loaded FROM bronze_ibis.meta "
+                    "WHERE file_path = :fp AND last_modified = :lm AND table_name = :tn"
+                ),
+                {'fp': db_path, 'lm': last_modified, 'tn': table_name},
+            ).fetchone()
+            if row and row.loaded:
+                logger.info(
+                    f"Skipping already-loaded: {os.path.basename(db_path)} ({table_name})"
+                )
+                return 0
+    except ProgrammingError:
+        pass
+
+    run_id = str(uuid.uuid4())
+    extracted_at = datetime.now(timezone.utc)
+
+    df = read_mdb_table(db_path, table_name)
+    df['run_uuid'] = run_id
+    df['file_name'] = os.path.basename(db_path)
+    df['file_path'] = db_path
+    df['country'] = country
+    df['community'] = community
+    df['extracted_at'] = extracted_at
+
+    try:
+        with engine.connect() as conn:
+            existing_cols = [
+                row[0] for row in conn.execute(
+                    text(
+                        "SELECT column_name FROM information_schema.columns "
+                        "WHERE table_schema = 'bronze_ibis' AND table_name = :tn"
+                    ),
+                    {'tn': table_name},
+                ).fetchall()
+            ]
+        if existing_cols:
+            df = df.reindex(columns=existing_cols)
+    except ProgrammingError:
+        pass
+
+    meta = pd.DataFrame([{
+        'run_uuid': run_id,
+        'file_name': os.path.basename(db_path),
+        'file_path': db_path,
+        'table_name': table_name,
+        'country': country,
+        'community': community,
+        'extracted_at': extracted_at,
+        'last_modified': last_modified,
+        'loaded': True,
+    }])
+    with engine.begin() as conn:
+        df.to_sql(table_name, conn, schema='bronze_ibis', if_exists='append', index=False)
+        meta.to_sql('meta', conn, schema='bronze_ibis', if_exists='append', index=False)
+
+    logger.info(
+        f"Ingested {len(df)} rows from '{os.path.basename(db_path)}'"
+        f" → bronze_ibis.{table_name} (run_uuid={run_id})"
+    )
+    return len(df)
+
+
+def _process_mdb_file(
+    engine,
+    db_path: str,
+    table_name: str,
+    country: str,
+    community: str,
+    extract_path: str,
+) -> tuple[int, list[str]]:
+    """
+    Ingest one MDB file's baseline (with quarantine-on-failure) and, if
+    present, followup table. Returns (rows_written, error_messages).
+    Each call uses its own short-lived DB connections — safe to run
+    concurrently (mirrors _process_tablet in ftp_to_extracted.py).
+    """
+    total_rows = 0
+    errors: list[str] = []
+    baseline_ok = True
+
+    try:
+        total_rows += _ingest_file(engine, db_path, table_name, country, community)
+    except Exception as exc:
+        tablet_folder = os.path.dirname(db_path)
+        try:
+            dest = _quarantine_tablet(tablet_folder, extract_path)
+            logger.warning(
+                f"[{country}] Quarantined corrupt MDB "
+                f"'{os.path.basename(db_path)}' → {dest}: {exc}"
+            )
+        except Exception as move_exc:
+            # Quarantine itself failing is not routine: the corrupt
+            # file stays in the active tree and will be retried (and
+            # fail again) on every future run — surface it as an
+            # error, not just a log line nobody reads.
+            msg = (
+                f"[{country}] Could not quarantine '{tablet_folder}' "
+                f"(original error: {exc}): {move_exc}"
+            )
+            logger.error(msg)
+            errors.append(msg)
+        baseline_ok = False
+
+    if not baseline_ok:
+        return total_rows, errors
+
+    # Ingest followup if present — not all tablets will have follow-up data yet
+    try:
+        available = list_mdb_tables(db_path)
+    except Exception as exc:
+        logger.warning(
+            f"[{country}] Could not list tables in '{os.path.basename(db_path)}': {exc}"
+        )
+        available = []
+
+    if 'followup' in available:
+        try:
+            total_rows += _ingest_file(engine, db_path, 'followup', country, community)
+        except Exception as exc:
+            msg = (
+                f"[{country}] Failed to ingest followup from "
+                f"'{os.path.basename(db_path)}': {exc}"
+            )
+            logger.error(msg)
+            errors.append(msg)
+    else:
+        logger.info(
+            f"[{country}] No followup table in '{os.path.basename(db_path)}' — skipping."
+        )
+
+    return total_rows, errors
+
+
 class MdbToBronze(BaseStage):
     name = 'mdb_to_bronze'
     dependencies: list[str] = ['ftp_to_extracted']
 
     def run(self) -> StageResult:
         communities = self.config.get('communities')
-        trial = self.config.get('trial')
         table_name = self.config.get('access_table_name')
         excluded_tablets = self.config.get('excluded_tablets', [])
 
@@ -73,137 +222,22 @@ class MdbToBronze(BaseStage):
             db_files = select_latest_per_tablet(db_files, excluded_tablets)
             logger.info(f"[{country}] {len(db_files)} MDB file(s) to process.")
 
-            for db_path in db_files:
-                baseline_ok = True
-                try:
-                    n = self._ingest_file(db_path, table_name, country, community_name)
-                    total_rows += n
-                except Exception as exc:
-                    tablet_folder = os.path.dirname(db_path)
-                    try:
-                        dest = _quarantine_tablet(tablet_folder, extract_path)
-                        logger.warning(
-                            f"[{country}] Quarantined corrupt MDB "
-                            f"'{os.path.basename(db_path)}' → {dest}: {exc}"
-                        )
-                    except Exception as move_exc:
-                        # Quarantine itself failing is not routine: the corrupt
-                        # file stays in the active tree and will be retried (and
-                        # fail again) on every future run — surface it as a
-                        # stage error, not just a log line nobody reads.
-                        msg = (
-                            f"[{country}] Could not quarantine '{tablet_folder}' "
-                            f"(original error: {exc}): {move_exc}"
-                        )
-                        logger.error(msg)
-                        errors.append(msg)
-                    baseline_ok = False
-
-                if not baseline_ok:
-                    continue
-
-                # Ingest followup if present — not all tablets will have follow-up data yet
-                try:
-                    available = list_mdb_tables(db_path)
-                except Exception as exc:
-                    logger.warning(
-                        f"[{country}] Could not list tables in '{os.path.basename(db_path)}': {exc}"
-                    )
-                    available = []
-
-                if 'followup' in available:
-                    try:
-                        n_fu = self._ingest_file(db_path, 'followup', country, community_name)
-                        total_rows += n_fu
-                    except Exception as exc:
-                        msg = (
-                            f"[{country}] Failed to ingest followup from "
-                            f"'{os.path.basename(db_path)}': {exc}"
-                        )
-                        logger.error(msg)
-                        errors.append(msg)
-                else:
-                    logger.info(
-                        f"[{country}] No followup table in '{os.path.basename(db_path)}' — skipping."
-                    )
+            # Process files in parallel — each worker uses its own DB connections.
+            with ThreadPoolExecutor(max_workers=_MAX_WORKERS) as executor:
+                futures = {
+                    executor.submit(
+                        _process_mdb_file, self.engine, db_path, table_name,
+                        country, community_name, extract_path,
+                    ): db_path
+                    for db_path in db_files
+                }
+                for future in as_completed(futures):
+                    rows, file_errors = future.result()
+                    total_rows += rows
+                    errors.extend(file_errors)
 
         return StageResult(
             success=len(errors) == 0,
             rows_written=total_rows,
             errors=errors,
         )
-
-    def _ingest_file(
-        self,
-        db_path: str,
-        table_name: str,
-        country: str,
-        community: str,
-    ) -> int:
-        """Load one MDB table from an MDB file into bronze_ibis.<table_name>. Returns rows written."""
-        last_modified = datetime.fromtimestamp(os.path.getmtime(db_path), tz=timezone.utc)
-
-        try:
-            with self.engine.connect() as conn:
-                row = conn.execute(
-                    text(
-                        "SELECT loaded FROM bronze_ibis.meta "
-                        "WHERE file_path = :fp AND last_modified = :lm AND table_name = :tn"
-                    ),
-                    {'fp': db_path, 'lm': last_modified, 'tn': table_name},
-                ).fetchone()
-                if row and row.loaded:
-                    logger.info(
-                        f"Skipping already-loaded: {os.path.basename(db_path)} ({table_name})"
-                    )
-                    return 0
-        except ProgrammingError:
-            pass
-
-        run_id = str(uuid.uuid4())
-        extracted_at = datetime.now(timezone.utc)
-
-        df = read_mdb_table(db_path, table_name)
-        df['run_uuid'] = run_id
-        df['file_name'] = os.path.basename(db_path)
-        df['file_path'] = db_path
-        df['country'] = country
-        df['community'] = community
-        df['extracted_at'] = extracted_at
-
-        try:
-            with self.engine.connect() as conn:
-                existing_cols = [
-                    row[0] for row in conn.execute(
-                        text(
-                            "SELECT column_name FROM information_schema.columns "
-                            "WHERE table_schema = 'bronze_ibis' AND table_name = :tn"
-                        ),
-                        {'tn': table_name},
-                    ).fetchall()
-                ]
-            if existing_cols:
-                df = df.reindex(columns=existing_cols)
-        except ProgrammingError:
-            pass
-
-        meta = pd.DataFrame([{
-            'run_uuid': run_id,
-            'file_name': os.path.basename(db_path),
-            'file_path': db_path,
-            'table_name': table_name,
-            'country': country,
-            'community': community,
-            'extracted_at': extracted_at,
-            'last_modified': last_modified,
-            'loaded': True,
-        }])
-        with self.engine.begin() as conn:
-            df.to_sql(table_name, conn, schema='bronze_ibis', if_exists='append', index=False)
-            meta.to_sql('meta', conn, schema='bronze_ibis', if_exists='append', index=False)
-
-        logger.info(
-            f"Ingested {len(df)} rows from '{os.path.basename(db_path)}'"
-            f" → bronze_ibis.{table_name} (run_uuid={run_id})"
-        )
-        return len(df)
