@@ -178,6 +178,11 @@ def _run(args, config, engine) -> None:
                     f['subjid'], f['mobile_number'], f['week'], f['error'],
                 )
         sys.exit(1 if result.failed > 0 else 0)
+    except Exception as exc:
+        success = False
+        errors = errors + [str(exc)]
+        logger.exception(f"Unexpected error in sms.py ({stage_name}): {exc}")
+        raise
     finally:
         record_stage_run(
             engine, pipeline_run_id, stage_name, started_at,
