@@ -69,6 +69,14 @@ LIMIT 20;
 
 ---
 
+## Missed-run alerting
+
+`scripts/check_missed_runs.py` runs on its own schedule (`sla_check_cron`, every 4 hours by default) and checks `ops.pipeline_runs` for whether each scheduled invocation (`ibis.py -a`, `store_ibis`, `sms --check-delivery`, `sms --weekly-report`, `reconcile_silver`) has actually run recently enough — 26 hours for daily jobs, 8.5 days for weekly ones. This catches the case existing per-run alerts (`send_pipeline_report`, `send_sms_flagged_alert`) can't: the cron job never firing at all. It's silent when everything is on schedule. `scripts/backup_db.sh` and `scripts/export_ug_incentive_arm.py` are standalone scripts that don't record into `ops.pipeline_runs` and are not covered by this check.
+
+**Note for a fresh deploy:** the very first check cycle after deploying this may report jobs as overdue simply because they haven't run yet in the new `ops.pipeline_runs` table's short history — allow each tracked job's first scheduled run to complete before treating an alert as real.
+
+---
+
 ## Prerequisites
 
 - [Docker](https://docs.docker.com/get-docker/) and Docker Compose

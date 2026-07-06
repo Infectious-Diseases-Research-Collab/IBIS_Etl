@@ -44,7 +44,8 @@
     "sms_weekly_report_cron": "0 10 * * 4",
     "incentive_report_cron":  "0 8 * * 5",
     "backup_cron":            "0 2 * * *",
-    "reconcile_cron":         "0 4 * * 0"
+    "reconcile_cron":         "0 4 * * 0",
+    "sla_check_cron":         "0 */4 * * *"
   },
   "email": {
     "smtp_host": "smtp.example.com",
