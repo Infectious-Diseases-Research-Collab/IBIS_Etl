@@ -121,6 +121,36 @@ def test_resend_validation_failure_records_failed_stage_run(monkeypatch):
     assert finish_kwargs['error_count'] == 1
 
 
+def test_construction_time_exception_on_default_path_records_correct_stage_name(monkeypatch):
+    """If SmsProcessor(...) construction itself raises on the default
+    (no-flag) send path — before stage_name is ever reassigned deep inside
+    that branch — the recorded stage_name must still say 'sms_send', not the
+    unrelated pre-try default ('sms_init_db')."""
+    calls = {'start': [], 'record': [], 'finish': []}
+    monkeypatch.setattr(sms, 'start_pipeline_run', lambda engine, invocation: (calls['start'].append(invocation), 1)[1])
+    monkeypatch.setattr(sms, 'record_stage_run', lambda *a, **kw: calls['record'].append((a, kw)))
+    monkeypatch.setattr(sms, 'finish_pipeline_run', lambda *a, **kw: calls['finish'].append((a, kw)))
+    monkeypatch.setattr(sms, 'init_schemas', lambda engine: None)
+    monkeypatch.setattr(sms, 'run_migrations', lambda engine: None)
+
+    def boom(self, *, config, engine):
+        raise RuntimeError('construction blew up')
+
+    monkeypatch.setattr(sms.SmsProcessor, '__init__', boom)
+
+    config = MagicMock()
+    engine = MagicMock()
+
+    with pytest.raises(RuntimeError, match='construction blew up'):
+        _run(_args(), config, engine)
+
+    assert len(calls['record']) == 1
+    (record_args, record_kwargs) = calls['record'][0]
+    # record_stage_run(engine, pipeline_run_id, stage_name, started_at, ...)
+    assert record_args[2] == 'sms_send'
+    assert record_kwargs['success'] is False
+
+
 def test_unexpected_exception_records_failed_metrics_and_still_propagates(monkeypatch):
     """A genuinely unexpected exception (e.g. a bug or a network error) raised
     inside a command branch — as opposed to an intentional sys.exit(...) —

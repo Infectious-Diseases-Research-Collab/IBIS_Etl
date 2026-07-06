@@ -147,6 +147,8 @@ def _run(args, config, engine) -> None:
             send_sms_weekly_report(engine, config)
             return
 
+        stage_name = 'sms_send'
+
         if args.dry_run:
             sms_cfg = dict(config.get('sms') or {})
             sms_cfg['dry_run'] = True
@@ -161,7 +163,6 @@ def _run(args, config, engine) -> None:
             logger.info("Queue sync complete: %d new row(s) inserted.", inserted)
             return
 
-        stage_name = 'sms_send'
         result = processor.run()
         rows_written = result.sent
         success = result.failed == 0
