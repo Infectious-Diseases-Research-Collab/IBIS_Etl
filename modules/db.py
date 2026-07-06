@@ -69,10 +69,33 @@ def run_migrations(engine: Engine) -> None:
 
 
 def init_sms_tables(engine: Engine) -> None:
-    """Create SMS tables from sql/sms/init_sms_schema.sql (idempotent — IF NOT EXISTS)."""
+    """
+    Create SMS tables from sql/sms/init_sms_schema.sql (idempotent — IF NOT
+    EXISTS). sms.message_status (a view, sql/sms/message_status_view.sql)
+    additionally depends on ibis.baseline, which doesn't exist until
+    promote_ibis has run at least once — so it's created separately and
+    conditionally. On a fresh database this is skipped with a warning; it
+    self-heals automatically on a later pipeline run once ibis.baseline
+    exists, since init_sms_tables runs on every startup.
+    """
     sql_path = Path(__file__).parent.parent / 'sql' / 'sms' / 'init_sms_schema.sql'
     with engine.begin() as conn:
         conn.execute(text(sql_path.read_text()))
+
+    with engine.begin() as conn:
+        ibis_baseline_exists = conn.execute(text(
+            "SELECT 1 FROM information_schema.tables "
+            "WHERE table_schema = 'ibis' AND table_name = 'baseline'"
+        )).fetchone()
+        if ibis_baseline_exists:
+            view_path = Path(__file__).parent.parent / 'sql' / 'sms' / 'message_status_view.sql'
+            conn.execute(text(view_path.read_text()))
+        else:
+            logger.warning(
+                "ibis.baseline does not exist yet — skipping sms.message_status "
+                "view creation; it will be created automatically once "
+                "promote_ibis has run at least once."
+            )
     logger.debug('SMS tables ready.')
 
 
