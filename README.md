@@ -326,6 +326,19 @@ docker compose run --rm etl python ibis.py -a -v     # verbose logging
 
 ---
 
+## Integration tests
+
+Alongside the fast, fully-mocked default test suite (`pytest -q`, no external dependencies), `tests/integration/` contains real-Postgres integration tests: DB bootstrap, a full end-to-end pipeline run (seeding `bronze_ibis` directly and running the real `BronzeToSilver → TransformIbis → MeasuresIbis → PromoteIbis → StoreIbis` stages), and data-contract tests asserting `gold_ibis`/`ibis` column shape. These are excluded from the default `pytest` run and require Docker (they provision a throwaway `postgres:16` container automatically via `testcontainers-python` — no manual setup beyond having Docker running):
+
+```bash
+pip install -r requirements-dev.txt
+pytest -m integration
+```
+
+`FtpToExtracted` (SFTP), `MdbToBronze` (the `mdb-export` subprocess), and `SendSms` (the BLASTA API) are deliberately not exercised here — they have real external dependencies that don't fit a hermetic test, and already have solid mocked-unit-test coverage in the default suite.
+
+---
+
 ## Deployment notes
 
 - The `db` service uses a named Docker volume (`pgdata`) so data persists across container restarts.
