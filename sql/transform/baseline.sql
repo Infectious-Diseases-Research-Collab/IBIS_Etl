@@ -8,11 +8,11 @@ SELECT * FROM (
     FROM silver_ibis.baseline b
     WHERE uniqueid IS NOT NULL
 ) t
--- Exclude ETL pipeline tracking columns; all survey data columns are retained.
+-- Exclude ETL pipeline tracking columns except run_uuid, which is kept as a
+-- lineage join key back to bronze_ibis.meta / silver_ibis.baseline_history.
 ;
 
 ALTER TABLE gold_ibis.baseline
-    DROP COLUMN IF EXISTS run_uuid,
     DROP COLUMN IF EXISTS file_name,
     DROP COLUMN IF EXISTS file_path,
     DROP COLUMN IF EXISTS extracted_at,

@@ -48,6 +48,10 @@ docker compose run --rm etl python ibis.py -p bronze_to_silver --full-rebuild
 
 The `ReconcileSilver` stage (described in the Architecture table above) runs weekly as a safety net, comparing the incrementally-maintained `silver_ibis` against a fresh rebuild to detect drift. For the full design rationale, see [Design Specification](docs/superpowers/specs/2026-07-03-incremental-silver-gold-design.md).
 
+### Gold Layer Lineage
+
+`gold_ibis.baseline`, `gold_ibis.followup`, and `gold_ibis.d_enrollment` (and therefore `ibis` and `store_ibis`, which both copy forward via `SELECT *`) carry a `run_uuid` column — a lineage join key back to `bronze_ibis.meta` or `silver_ibis.<table>_history` for tracing which extraction run produced a given row's current values. Other ETL-internal tracking columns (`file_name`, `file_path`, `extracted_at`) are still dropped at the gold layer to keep production tables free of raw file-path/timestamp noise for the PIs and analysts who query them directly.
+
 ---
 
 ## Prerequisites

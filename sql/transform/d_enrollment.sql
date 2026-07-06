@@ -14,7 +14,8 @@ SELECT
     vdate,
     starttime,
     stoptime,
-    interviewer_id
+    interviewer_id,
+    run_uuid
 FROM silver_ibis.baseline
 WHERE consent::integer = 1
   AND subjid IS NOT NULL;
