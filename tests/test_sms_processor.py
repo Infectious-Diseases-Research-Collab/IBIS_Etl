@@ -405,6 +405,109 @@ def test_send_due_messages_missing_template_skips():
 
 
 # ---------------------------------------------------------------------------
+# SmsProcessor.send_due_messages — auto-retry on failure
+# ---------------------------------------------------------------------------
+
+def test_count_recent_failures_returns_scalar_count():
+    from modules.sms_processor import SmsProcessor
+
+    engine, conn = make_engine_mock()
+    conn.execute.return_value.scalar.return_value = 2
+
+    processor = SmsProcessor(config=make_config(), engine=engine)
+    count = processor._count_recent_failures('IBIS001', 8)
+
+    assert count == 2
+
+
+def test_send_due_messages_resets_to_pending_when_under_retry_cap():
+    from modules.sms_processor import SmsProcessor
+
+    row = MagicMock()
+    row._asdict.return_value = {
+        'id': 3, 'subjid': 'IBIS003', 'mobile_number': '0700000003',
+        'arm_text': 'HIV Risk Assessment', 'language': 'English',
+        'week': 8, 'appointment_date': None,
+    }
+    template_row = MagicMock()
+    template_row.message_text = 'Please visit the clinic.'
+    template_row.has_placeholder = False
+
+    engine, conn = make_engine_mock()
+    conn.execute.return_value.fetchall.return_value = [row]
+    conn.execute.return_value.fetchone.return_value = template_row
+    conn.execute.return_value.scalar.return_value = 1  # first failure, under cap of 3
+
+    processor = SmsProcessor(config=make_config(), engine=engine)
+    processor._client = MagicMock()
+    processor._client.send.side_effect = Exception("network blip")
+
+    with patch.object(processor, '_update_queue_status') as mock_update_status:
+        result = processor.send_due_messages()
+
+    assert result.failed == 1
+    mock_update_status.assert_called_once_with(3, 'pending')
+
+
+def test_send_due_messages_leaves_failed_when_retry_cap_reached():
+    from modules.sms_processor import SmsProcessor
+
+    row = MagicMock()
+    row._asdict.return_value = {
+        'id': 4, 'subjid': 'IBIS004', 'mobile_number': '0700000004',
+        'arm_text': 'HIV Risk Assessment', 'language': 'English',
+        'week': 8, 'appointment_date': None,
+    }
+    template_row = MagicMock()
+    template_row.message_text = 'Please visit the clinic.'
+    template_row.has_placeholder = False
+
+    engine, conn = make_engine_mock()
+    conn.execute.return_value.fetchall.return_value = [row]
+    conn.execute.return_value.fetchone.return_value = template_row
+    conn.execute.return_value.scalar.return_value = 3  # cap reached
+
+    processor = SmsProcessor(config=make_config(), engine=engine)
+    processor._client = MagicMock()
+    processor._client.send.side_effect = Exception("permanent failure")
+
+    with patch.object(processor, '_update_queue_status') as mock_update_status:
+        result = processor.send_due_messages()
+
+    assert result.failed == 1
+    mock_update_status.assert_called_once_with(4, 'failed')
+
+
+def test_send_due_messages_success_path_unaffected_by_retry_logic():
+    from modules.sms_processor import SmsProcessor
+
+    row = MagicMock()
+    row._asdict.return_value = {
+        'id': 5, 'subjid': 'IBIS005', 'mobile_number': '0700000005',
+        'arm_text': 'HIV Risk Assessment', 'language': 'English',
+        'week': 8, 'appointment_date': None,
+    }
+    template_row = MagicMock()
+    template_row.message_text = 'Please visit the clinic.'
+    template_row.has_placeholder = False
+
+    engine, conn = make_engine_mock()
+    conn.execute.return_value.fetchall.return_value = [row]
+    conn.execute.return_value.fetchone.return_value = template_row
+
+    processor = SmsProcessor(config=make_config(), engine=engine)
+    processor._client = MagicMock()
+    processor._client.send.return_value = {'msg_id': 'abc123'}
+
+    with patch.object(processor, '_update_queue_status') as mock_update_status:
+        result = processor.send_due_messages()
+
+    assert result.sent == 1
+    assert result.failed == 0
+    mock_update_status.assert_called_once_with(5, 'sent')
+
+
+# ---------------------------------------------------------------------------
 # SendSms stage
 # ---------------------------------------------------------------------------
 

@@ -15,6 +15,8 @@ from modules.utils import load_fernet_key
 
 logger = logging.getLogger(__name__)
 
+_MAX_AUTO_RETRIES = 3
+
 BLASTA_BASE_URL = "https://sms.dmarkmobile.com/v3/api"
 
 # Maps raw values from ibis.baseline → canonical values in sms.templates
@@ -354,6 +356,13 @@ class SmsProcessor:
                 {"status": status, "id": queue_id},
             )
 
+    def _count_recent_failures(self, subjid: str, week: int) -> int:
+        with self._engine.connect() as conn:
+            count = conn.execute(text("""
+                SELECT COUNT(*) FROM sms.log WHERE subjid = :subjid AND week = :week AND status = 'failed'
+            """), {"subjid": subjid, "week": week}).scalar()
+        return count or 0
+
     def send_due_messages(self) -> SendResult:
         """Send all messages due today. Returns SendResult."""
         due = self.get_due_messages()
@@ -412,7 +421,22 @@ class SmsProcessor:
                 provider_message_id=provider_msg_id,
                 error_message=error_msg,
             )
-            self._update_queue_status(row['id'], 'sent' if success else 'failed')
+            if success:
+                self._update_queue_status(row['id'], 'sent')
+            else:
+                failure_count = self._count_recent_failures(row['subjid'], row['week'])
+                if failure_count < _MAX_AUTO_RETRIES:
+                    self._update_queue_status(row['id'], 'pending')
+                    logger.info(
+                        "Auto-retry %d/%d scheduled for subjid=%s week=%d",
+                        failure_count, _MAX_AUTO_RETRIES, row['subjid'], row['week'],
+                    )
+                else:
+                    self._update_queue_status(row['id'], 'failed')
+                    logger.warning(
+                        "Retry cap (%d) reached for subjid=%s week=%d — left failed for manual review",
+                        _MAX_AUTO_RETRIES, row['subjid'], row['week'],
+                    )
 
         return result
 
