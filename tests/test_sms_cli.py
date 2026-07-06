@@ -56,6 +56,51 @@ def test_check_delivery_exits_nonzero_when_stage_fails():
     assert exc_info.value.code == 1
 
 
+def test_check_delivery_records_invocation_with_flag_suffix(monkeypatch):
+    """ops.pipeline_runs.invocation must distinguish --check-delivery from
+    every other sms.py command (and from a bare 'sms') so
+    scripts/check_missed_runs.py can track each schedule's last-run time
+    independently — see _TRACKED_INVOCATIONS's 'sms --check-delivery' key."""
+    calls = {'start': []}
+    monkeypatch.setattr(sms, 'start_pipeline_run', lambda engine, invocation: (calls['start'].append(invocation), 1)[1])
+    monkeypatch.setattr(sms, 'record_stage_run', lambda *a, **kw: None)
+    monkeypatch.setattr(sms, 'finish_pipeline_run', lambda *a, **kw: None)
+    monkeypatch.setattr(sms, 'init_schemas', lambda engine: None)
+    monkeypatch.setattr(sms, 'run_migrations', lambda engine: None)
+
+    config = MagicMock()
+    engine = MagicMock()
+
+    with patch('sms.FetchDlr') as MockFetchDlr:
+        MockFetchDlr.return_value.run.return_value = StageResult(
+            success=True, rows_written=0,
+            metadata={'checked': 0, 'updated': 0, 'pending': 0, 'errors': [], 'flagged': 0},
+        )
+        with pytest.raises(SystemExit):
+            _run(_args(check_delivery=True), config, engine)
+
+    assert calls['start'] == ['sms --check-delivery']
+
+
+def test_weekly_report_records_invocation_with_flag_suffix(monkeypatch):
+    """Same guarantee as above for --weekly-report — see _TRACKED_INVOCATIONS's
+    'sms --weekly-report' key."""
+    calls = {'start': []}
+    monkeypatch.setattr(sms, 'start_pipeline_run', lambda engine, invocation: (calls['start'].append(invocation), 1)[1])
+    monkeypatch.setattr(sms, 'record_stage_run', lambda *a, **kw: None)
+    monkeypatch.setattr(sms, 'finish_pipeline_run', lambda *a, **kw: None)
+    monkeypatch.setattr(sms, 'init_schemas', lambda engine: None)
+    monkeypatch.setattr(sms, 'run_migrations', lambda engine: None)
+    monkeypatch.setattr(sms, 'send_sms_weekly_report', lambda engine, config: None)
+
+    config = MagicMock()
+    engine = MagicMock()
+
+    _run(_args(weekly_report=True), config, engine)
+
+    assert calls['start'] == ['sms --weekly-report']
+
+
 def test_run_records_metrics_around_default_send(monkeypatch):
     """The default (no-flag) command path — SmsProcessor.run() — must be
     wrapped in start/record/finish just like every other sms.py command."""

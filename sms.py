@@ -81,7 +81,18 @@ def _run(args, config, engine) -> None:
     init_schemas(engine)  # ensures sms schema exists
     run_migrations(engine)  # ensures ops.pipeline_runs/stage_runs exist
 
-    invocation = 'sms'
+    if args.init_db:
+        invocation = 'sms --init-db'
+    elif args.resend:
+        invocation = 'sms --resend'
+    elif args.check_delivery:
+        invocation = 'sms --check-delivery'
+    elif args.weekly_report:
+        invocation = 'sms --weekly-report'
+    elif args.sync:
+        invocation = 'sms --sync'
+    else:
+        invocation = 'sms'
     try:
         pipeline_run_id = start_pipeline_run(engine, invocation)
     except Exception as exc:

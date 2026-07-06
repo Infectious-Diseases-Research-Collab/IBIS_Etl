@@ -29,10 +29,10 @@ logger = logging.getLogger(__name__)
 
 _TRACKED_INVOCATIONS: dict[str, timedelta] = {
     '-a': timedelta(hours=26),
-    'store_ibis': timedelta(days=8.5),
+    '-p store_ibis': timedelta(days=8.5),
     'sms --check-delivery': timedelta(hours=26),
     'sms --weekly-report': timedelta(days=8.5),
-    'reconcile_silver': timedelta(days=8.5),
+    '-p reconcile_silver': timedelta(days=8.5),
 }
 
 
