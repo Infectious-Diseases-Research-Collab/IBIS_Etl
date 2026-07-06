@@ -5,6 +5,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
+import sms
 from sms import _run
 from stages.base import StageResult
 
@@ -53,3 +54,68 @@ def test_check_delivery_exits_nonzero_when_stage_fails():
             _run(_args(check_delivery=True), config, engine)
 
     assert exc_info.value.code == 1
+
+
+def test_run_records_metrics_around_default_send(monkeypatch):
+    """The default (no-flag) command path — SmsProcessor.run() — must be
+    wrapped in start/record/finish just like every other sms.py command."""
+    calls = {'start': [], 'record': [], 'finish': []}
+    monkeypatch.setattr(sms, 'start_pipeline_run', lambda engine, invocation: (calls['start'].append(invocation), 1)[1])
+    monkeypatch.setattr(sms, 'record_stage_run', lambda *a, **kw: calls['record'].append((a, kw)))
+    monkeypatch.setattr(sms, 'finish_pipeline_run', lambda *a, **kw: calls['finish'].append((a, kw)))
+    monkeypatch.setattr(sms, 'init_schemas', lambda engine: None)
+    monkeypatch.setattr(sms, 'run_migrations', lambda engine: None)
+
+    fake_result = MagicMock(sent=3, failed=0, skipped=1, failures=[])
+    monkeypatch.setattr(sms.SmsProcessor, 'run', lambda self: fake_result)
+
+    config = MagicMock()
+    engine = MagicMock()
+
+    with pytest.raises(SystemExit):
+        _run(_args(), config, engine)
+
+    assert calls['start'] == ['sms']
+    assert len(calls['record']) == 1
+    assert len(calls['finish']) == 1
+
+    (record_args, record_kwargs) = calls['record'][0]
+    assert record_kwargs['success'] is True
+    assert record_kwargs['rows_written'] == 3
+    assert record_kwargs['errors'] == []
+
+    (finish_args, finish_kwargs) = calls['finish'][0]
+    assert finish_kwargs['success'] is True
+    assert finish_kwargs['rows_written'] == 3
+    assert finish_kwargs['error_count'] == 0
+
+
+def test_resend_validation_failure_records_failed_stage_run(monkeypatch):
+    """--resend with missing required flags exits before ever calling
+    processor.resend(...) — the recorded stage_run must still reflect that
+    failure (success=False, the validation error message), not a stale
+    default from before the validation check ran."""
+    calls = {'start': [], 'record': [], 'finish': []}
+    monkeypatch.setattr(sms, 'start_pipeline_run', lambda engine, invocation: (calls['start'].append(invocation), 1)[1])
+    monkeypatch.setattr(sms, 'record_stage_run', lambda *a, **kw: calls['record'].append((a, kw)))
+    monkeypatch.setattr(sms, 'finish_pipeline_run', lambda *a, **kw: calls['finish'].append((a, kw)))
+    monkeypatch.setattr(sms, 'init_schemas', lambda engine: None)
+    monkeypatch.setattr(sms, 'run_migrations', lambda engine: None)
+
+    config = MagicMock()
+    engine = MagicMock()
+
+    with pytest.raises(SystemExit) as exc_info:
+        _run(_args(resend=True), config, engine)
+
+    assert exc_info.value.code == 1
+    assert len(calls['record']) == 1
+    assert len(calls['finish']) == 1
+
+    (record_args, record_kwargs) = calls['record'][0]
+    assert record_kwargs['success'] is False
+    assert record_kwargs['errors'] == ['--resend requires --subjid, --week, --actor']
+
+    (finish_args, finish_kwargs) = calls['finish'][0]
+    assert finish_kwargs['success'] is False
+    assert finish_kwargs['error_count'] == 1
