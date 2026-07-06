@@ -418,6 +418,8 @@ def test_count_recent_failures_returns_scalar_count():
     count = processor._count_recent_failures('IBIS001', 8)
 
     assert count == 2
+    call_args = conn.execute.call_args
+    assert call_args[0][1] == {'subjid': 'IBIS001', 'week': 8}
 
 
 def test_send_due_messages_resets_to_pending_when_under_retry_cap():
@@ -447,6 +449,35 @@ def test_send_due_messages_resets_to_pending_when_under_retry_cap():
 
     assert result.failed == 1
     mock_update_status.assert_called_once_with(3, 'pending')
+
+
+def test_send_due_messages_resets_to_pending_at_last_allowed_retry():
+    from modules.sms_processor import SmsProcessor
+
+    row = MagicMock()
+    row._asdict.return_value = {
+        'id': 6, 'subjid': 'IBIS006', 'mobile_number': '0700000006',
+        'arm_text': 'HIV Risk Assessment', 'language': 'English',
+        'week': 8, 'appointment_date': None,
+    }
+    template_row = MagicMock()
+    template_row.message_text = 'Please visit the clinic.'
+    template_row.has_placeholder = False
+
+    engine, conn = make_engine_mock()
+    conn.execute.return_value.fetchall.return_value = [row]
+    conn.execute.return_value.fetchone.return_value = template_row
+    conn.execute.return_value.scalar.return_value = 2  # third attempt, still under cap of 3
+
+    processor = SmsProcessor(config=make_config(), engine=engine)
+    processor._client = MagicMock()
+    processor._client.send.side_effect = Exception("still failing")
+
+    with patch.object(processor, '_update_queue_status') as mock_update_status:
+        result = processor.send_due_messages()
+
+    assert result.failed == 1
+    mock_update_status.assert_called_once_with(6, 'pending')
 
 
 def test_send_due_messages_leaves_failed_when_retry_cap_reached():
