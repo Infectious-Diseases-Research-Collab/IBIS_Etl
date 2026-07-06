@@ -11,7 +11,7 @@ from sqlalchemy.engine import Engine, URL
 
 logger = logging.getLogger(__name__)
 
-SCHEMAS = ['bronze_ibis', 'silver_ibis', 'gold_ibis', 'ibis', 'store_ibis', 'sms']
+SCHEMAS = ['bronze_ibis', 'silver_ibis', 'gold_ibis', 'ibis', 'store_ibis', 'sms', 'ops']
 
 # A read-only role for reporting/dashboard tools, so they don't need the same
 # DDL/write privileges as the ETL's own connection. See init_readonly_role().
