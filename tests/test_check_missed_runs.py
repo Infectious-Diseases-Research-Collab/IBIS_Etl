@@ -67,3 +67,27 @@ def test_find_overdue_only_flags_the_specific_overdue_invocation():
 
     assert len(overdue) == 1
     assert overdue[0]['invocation'] == '-a'
+
+
+def test_ibis_scheduled_invocations_are_tracked():
+    from argparse import Namespace
+    from ibis import _compute_invocation as ibis_compute_invocation
+
+    assert ibis_compute_invocation(Namespace(all=True, pipeline=None)) in _TRACKED_INVOCATIONS
+    assert ibis_compute_invocation(Namespace(all=False, pipeline='store_ibis')) in _TRACKED_INVOCATIONS
+    assert ibis_compute_invocation(Namespace(all=False, pipeline='reconcile_silver')) in _TRACKED_INVOCATIONS
+
+
+def test_sms_scheduled_invocations_are_tracked():
+    from argparse import Namespace
+    from sms import _compute_invocation as sms_compute_invocation
+
+    check_delivery_args = Namespace(
+        init_db=False, resend=False, check_delivery=True, weekly_report=False, sync=False,
+    )
+    weekly_report_args = Namespace(
+        init_db=False, resend=False, check_delivery=False, weekly_report=True, sync=False,
+    )
+
+    assert sms_compute_invocation(check_delivery_args) in _TRACKED_INVOCATIONS
+    assert sms_compute_invocation(weekly_report_args) in _TRACKED_INVOCATIONS

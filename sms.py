@@ -38,6 +38,20 @@ def init_db(engine) -> None:
     logger.info("SMS tables created (or already existed).")
 
 
+def _compute_invocation(args) -> str:
+    if args.init_db:
+        return 'sms --init-db'
+    if args.resend:
+        return 'sms --resend'
+    if args.check_delivery:
+        return 'sms --check-delivery'
+    if args.weekly_report:
+        return 'sms --weekly-report'
+    if args.sync:
+        return 'sms --sync'
+    return 'sms'
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description='IBIS SMS standalone runner')
     parser.add_argument('--sync',            action='store_true', help='Sync queue only, no sending')
@@ -81,18 +95,7 @@ def _run(args, config, engine) -> None:
     init_schemas(engine)  # ensures sms schema exists
     run_migrations(engine)  # ensures ops.pipeline_runs/stage_runs exist
 
-    if args.init_db:
-        invocation = 'sms --init-db'
-    elif args.resend:
-        invocation = 'sms --resend'
-    elif args.check_delivery:
-        invocation = 'sms --check-delivery'
-    elif args.weekly_report:
-        invocation = 'sms --weekly-report'
-    elif args.sync:
-        invocation = 'sms --sync'
-    else:
-        invocation = 'sms'
+    invocation = _compute_invocation(args)
     try:
         pipeline_run_id = start_pipeline_run(engine, invocation)
     except Exception as exc:

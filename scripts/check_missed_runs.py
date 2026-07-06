@@ -27,6 +27,9 @@ from modules.notifier import send_missed_run_alert
 configure_logging()
 logger = logging.getLogger(__name__)
 
+# Keys must exactly match the strings produced by ibis.py's and sms.py's
+# _compute_invocation() functions — see test_ibis_scheduled_invocations_are_tracked
+# and test_sms_scheduled_invocations_are_tracked in tests/test_check_missed_runs.py.
 _TRACKED_INVOCATIONS: dict[str, timedelta] = {
     '-a': timedelta(hours=26),
     '-p store_ibis': timedelta(days=8.5),

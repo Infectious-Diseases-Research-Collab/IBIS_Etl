@@ -93,6 +93,10 @@ def topological_sort(deps: dict[str, list[str]]) -> list[str]:
     return order
 
 
+def _compute_invocation(args) -> str:
+    return '-a' if args.all else f'-p {args.pipeline}'
+
+
 def build_run_list(
     deps: dict[str, list[str]],
     *,
@@ -233,7 +237,7 @@ def main() -> None:
             _maybe_init_readonly_role(config, engine)
 
             stages = build_run_list(STAGE_DEPS, run_all=args.all, pipeline=args.pipeline)
-            invocation = '-a' if args.all else f'-p {args.pipeline}'
+            invocation = _compute_invocation(args)
             run_pipeline(stages, config, engine, full_rebuild=args.full_rebuild, invocation=invocation)
     except PipelineLockError as exc:
         logger.error(str(exc))
