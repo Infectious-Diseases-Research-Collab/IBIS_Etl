@@ -1,10 +1,18 @@
 from __future__ import annotations
 
+from datetime import datetime, timezone
+
+import pandas as pd
 import pytest
 from sqlalchemy import create_engine, text
 from testcontainers.postgres import PostgresContainer
 
 from modules.db import SCHEMAS, init_schemas, init_sms_tables, run_migrations
+from stages.bronze_to_silver import BronzeToSilver
+from stages.measures_ibis import MeasuresIbis
+from stages.promote_ibis import PromoteIbis
+from stages.store_ibis import StoreIbis
+from stages.transform_ibis import TransformIbis
 
 
 @pytest.fixture(scope='session')
@@ -39,16 +47,6 @@ def clean_engine(postgres_container):
     yield engine
     engine.dispose()
 
-
-from datetime import date, datetime, timezone
-
-import pandas as pd
-
-from stages.bronze_to_silver import BronzeToSilver
-from stages.measures_ibis import MeasuresIbis
-from stages.promote_ibis import PromoteIbis
-from stages.store_ibis import StoreIbis
-from stages.transform_ibis import TransformIbis
 
 _FIXTURE_CONFIG = {
     'trial': {
