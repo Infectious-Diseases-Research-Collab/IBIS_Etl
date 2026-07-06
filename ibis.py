@@ -15,6 +15,7 @@ from modules.db import (
     pipeline_lock,
     run_migrations,
 )
+from modules.logging_utils import configure_logging
 from stages.base import StageResult
 
 from stages.ftp_to_extracted import FtpToExtracted
@@ -29,10 +30,7 @@ from stages.reconcile_silver import ReconcileSilver
 
 from modules.notifier import send_pipeline_report
 
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s [%(levelname)s] %(name)s - %(message)s',
-)
+configure_logging()
 logger = logging.getLogger(__name__)
 
 STAGE_CLASSES = {

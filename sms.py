@@ -16,14 +16,12 @@ import sys
 
 from modules.config import ConfigLoader
 from modules.db import PipelineLockError, create_db_engine, init_schemas, init_sms_tables, pipeline_lock
+from modules.logging_utils import configure_logging
 from modules.notifier import send_sms_weekly_report
 from modules.sms_processor import SmsProcessor
 from stages.fetch_dlr import FetchDlr
 
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s [%(levelname)s] %(name)s - %(message)s',
-)
+configure_logging()
 logger = logging.getLogger(__name__)
 
 # Separate from ibis.py's lock: SMS operations (sync/send/DLR poll/reports)
