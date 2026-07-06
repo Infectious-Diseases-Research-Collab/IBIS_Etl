@@ -40,6 +40,37 @@ def _validate_table_name(name: str) -> str:
     return name
 
 
+def _reconcile_columns(conn, table: str) -> None:
+    """
+    store_ibis.<table> is append-only and never rebuilt — if ibis.<table>
+    gains a column after store_ibis.<table> was first created, the append
+    would otherwise fail with a column-count mismatch. Add any column
+    present in ibis.<table> but missing from store_ibis.<table> before
+    every snapshot attempt. Adding a column to a partitioned parent table
+    in Postgres automatically applies to all its existing child partitions
+    too, so this is safe to run against an already-partitioned table.
+    """
+    ibis_cols = conn.execute(text(
+        "SELECT column_name, data_type FROM information_schema.columns "
+        "WHERE table_schema = 'ibis' AND table_name = :t"
+    ), {'t': table}).fetchall()
+    store_cols = {
+        row[0] for row in conn.execute(text(
+            "SELECT column_name FROM information_schema.columns "
+            "WHERE table_schema = 'store_ibis' AND table_name = :t"
+        ), {'t': table}).fetchall()
+    }
+    for col_name, data_type in ibis_cols:
+        if col_name not in store_cols:
+            conn.execute(text(
+                f'ALTER TABLE store_ibis."{table}" ADD COLUMN IF NOT EXISTS "{col_name}" {data_type}'
+            ))
+            logger.info(
+                f"  Added missing column '{col_name}' to store_ibis.{table} "
+                f"(schema drift reconciliation)."
+            )
+
+
 class StoreIbis(BaseStage):
     name = 'store_ibis'
     dependencies: list[str] = ['promote_ibis']
@@ -106,6 +137,8 @@ class StoreIbis(BaseStage):
             logger.warning(f"  Migrating store_ibis.{table} to a partitioned table...")
             migrate_to_partitioned(conn, 'store_ibis', table, 'snapshot_date')
             logger.info(f"  Migration complete: store_ibis.{table} is now partitioned.")
+
+        _reconcile_columns(conn, table)
 
         ensure_month_partition(conn, 'store_ibis', table, today)
 

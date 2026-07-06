@@ -13,9 +13,16 @@ def _make_engine(execute_side_effect):
     return engine, mock_conn
 
 
-def _base_side_effect(store_exists, snapshot_count=0, source_count=100, columns=None):
+def _base_side_effect(store_exists, snapshot_count=0, source_count=100, columns=None, store_columns=None):
     """Shared fixture builder: one table 'd_participant' in ibis, configurable
-    store_ibis existence/counts."""
+    store_ibis existence/counts.
+
+    `columns` configures the ibis.<table> column list (used both by
+    _create_partitioned_table and by _reconcile_columns' "what does ibis
+    have" query). `store_columns`, if given, configures a *different*
+    column list for the store_ibis.<table> side of _reconcile_columns —
+    defaults to mirroring `columns` (i.e. nothing missing), matching the
+    steady-state behavior most tests rely on."""
     def execute_side_effect(stmt, *args, **kwargs):
         sql = str(stmt)
         result = MagicMock()
@@ -23,8 +30,13 @@ def _base_side_effect(store_exists, snapshot_count=0, source_count=100, columns=
             result.fetchall.return_value = [('d_participant',)]
         elif 'information_schema.tables' in sql and "table_schema = 'store_ibis'" in sql:
             result.scalar.return_value = 1 if store_exists else None
-        elif 'information_schema.columns' in sql:
+        elif 'information_schema.columns' in sql and "table_schema = 'ibis'" in sql:
             result.fetchall.return_value = columns or [('uniqueid', 'text'), ('value', 'text')]
+        elif 'information_schema.columns' in sql and "table_schema = 'store_ibis'" in sql:
+            if store_columns is not None:
+                result.fetchall.return_value = store_columns
+            else:
+                result.fetchall.return_value = [(c,) for c, _ in (columns or [('uniqueid', 'text'), ('value', 'text')])]
         elif 'COUNT(*)' in sql and 'snapshot_date' in sql:
             result.scalar.return_value = snapshot_count
         elif 'COUNT(*)' in sql:
@@ -194,6 +206,53 @@ def test_cutoff_month_twelve_months_back():
 def test_cutoff_month_handles_year_rollover():
     assert _cutoff_month(date(2026, 3, 5), 12) == date(2025, 3, 1)
     assert _cutoff_month(date(2026, 1, 5), 12) == date(2025, 1, 1)
+
+
+def test_snapshot_table_adds_missing_column_when_ibis_schema_has_grown():
+    """store_ibis.<table> is append-only and never rebuilt — if ibis.<table>
+    gains a column after store_ibis.<table> was first created, the next
+    snapshot must reconcile the schema (ALTER TABLE ADD COLUMN) rather than
+    fail with an INSERT column-count mismatch."""
+    engine, mock_conn = _make_engine(_base_side_effect(
+        store_exists=True,
+        columns=[('uniqueid', 'text'), ('run_uuid', 'text')],
+        store_columns=[('uniqueid',)],  # missing run_uuid
+    ))
+    stage = StoreIbis(config=MagicMock(), engine=engine)
+
+    with patch('stages.store_ibis.date') as mock_date:
+        mock_date.today.return_value = date(2026, 4, 13)
+        with patch('stages.store_ibis.is_partitioned', return_value=True), \
+             patch('stages.store_ibis.ensure_month_partition'):
+            result = stage.run()
+
+    assert result.success
+    executed_sql = [str(c.args[0]) for c in mock_conn.execute.call_args_list]
+    assert any(
+        'ALTER TABLE store_ibis."d_participant"' in s and 'ADD COLUMN IF NOT EXISTS "run_uuid"' in s
+        for s in executed_sql
+    )
+
+
+def test_snapshot_table_skips_reconciliation_when_no_columns_missing():
+    """When store_ibis.<table> already has every column ibis.<table> has,
+    no ALTER TABLE should be issued."""
+    engine, mock_conn = _make_engine(_base_side_effect(
+        store_exists=True,
+        columns=[('uniqueid', 'text'), ('run_uuid', 'text')],
+        store_columns=[('uniqueid',), ('run_uuid',)],  # nothing missing
+    ))
+    stage = StoreIbis(config=MagicMock(), engine=engine)
+
+    with patch('stages.store_ibis.date') as mock_date:
+        mock_date.today.return_value = date(2026, 4, 13)
+        with patch('stages.store_ibis.is_partitioned', return_value=True), \
+             patch('stages.store_ibis.ensure_month_partition'):
+            result = stage.run()
+
+    assert result.success
+    executed_sql = [str(c.args[0]) for c in mock_conn.execute.call_args_list]
+    assert not any('ALTER TABLE store_ibis."d_participant" ADD COLUMN' in s for s in executed_sql)
 
 
 def test_store_ibis_retires_partitions_past_retention_window():
