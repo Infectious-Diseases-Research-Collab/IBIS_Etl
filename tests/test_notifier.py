@@ -496,6 +496,75 @@ def test_build_weekly_sms_df_due_row_has_no_pct():
     assert due_row['Total'] == 6
 
 
+
+# ---------------------------------------------------------------------------
+# send_missed_run_alert
+# ---------------------------------------------------------------------------
+
+def test_send_missed_run_alert_sends_email_listing_overdue_invocations(tmp_path):
+    from datetime import datetime, timedelta, timezone
+    from modules.notifier import send_missed_run_alert
+
+    config = _config(_make_email_cfg(tmp_path))
+    overdue = [{
+        'invocation': '-a',
+        'threshold': timedelta(hours=26),
+        'last_seen': datetime(2026, 1, 1, tzinfo=timezone.utc),
+    }]
+
+    mock_smtp_instance = MagicMock()
+    with patch('smtplib.SMTP') as mock_smtp_cls:
+        mock_smtp_cls.return_value.__enter__.return_value = mock_smtp_instance
+        send_missed_run_alert(overdue, config)
+
+    mock_smtp_instance.sendmail.assert_called_once()
+    to_arg = mock_smtp_instance.sendmail.call_args[0][1]
+    assert to_arg == ['admin@example.com']
+
+    body = _plain_text_body(mock_smtp_instance.sendmail.call_args[0][2])
+    assert '-a' in body
+    assert '2026-01-01' in body
+
+
+def test_send_missed_run_alert_mentions_never_seen_invocation(tmp_path):
+    from modules.notifier import send_missed_run_alert
+
+    config = _config(_make_email_cfg(tmp_path))
+    overdue = [{'invocation': 'store_ibis', 'threshold': None, 'last_seen': None}]
+
+    mock_smtp_instance = MagicMock()
+    with patch('smtplib.SMTP') as mock_smtp_cls:
+        mock_smtp_cls.return_value.__enter__.return_value = mock_smtp_instance
+        send_missed_run_alert(overdue, config)
+
+    body = _plain_text_body(mock_smtp_instance.sendmail.call_args[0][2])
+    assert 'store_ibis' in body
+    assert 'never seen' in body
+
+
+def test_send_missed_run_alert_no_op_when_no_email_config():
+    from modules.notifier import send_missed_run_alert
+
+    with patch('smtplib.SMTP') as mock_smtp_cls:
+        send_missed_run_alert(
+            [{'invocation': '-a', 'threshold': None, 'last_seen': None}],
+            config={},
+        )
+
+    mock_smtp_cls.assert_not_called()
+
+
+def test_send_missed_run_alert_does_not_raise_on_smtp_error(tmp_path):
+    """SMTP failure is logged and swallowed — must not raise to the caller."""
+    from modules.notifier import send_missed_run_alert
+
+    config = _config(_make_email_cfg(tmp_path))
+    overdue = [{'invocation': '-a', 'threshold': None, 'last_seen': None}]
+
+    with patch('smtplib.SMTP', side_effect=smtplib.SMTPException('conn refused')):
+        send_missed_run_alert(overdue, config)
+
+
 def test_build_weekly_sms_df_zero_due_no_crash():
     """When due and submitted are 0, % cells and site cells should be empty strings."""
     from modules.notifier import _build_weekly_sms_df

@@ -244,6 +244,39 @@ def send_pipeline_report(
                 logger.error(f'Notifier failed (field recipients {country}) \u2014 email not sent: {exc}')
 
 
+def send_missed_run_alert(overdue: list[dict], config) -> None:
+    """
+    Email pipeline_recipients when one or more tracked invocations haven't
+    run recently enough (see scripts/check_missed_runs.py's find_overdue).
+    Silently returns if no email config is present. SMTP errors are caught
+    and logged — never raised to the caller.
+    """
+    email_cfg = config.get('email')
+    if not email_cfg:
+        return
+
+    recipients = email_cfg.get('pipeline_recipients', [])
+    if not recipients:
+        return
+
+    def _describe(item: dict) -> str:
+        last_seen = item['last_seen'].isoformat() if item['last_seen'] else 'never seen'
+        return f"{item['invocation']}: last run {last_seen} (threshold {item['threshold']})"
+
+    plain = "The following scheduled pipeline invocations are overdue:\n\n" + "\n".join(
+        f"  {_describe(item)}" for item in overdue
+    )
+    html = "<p>The following scheduled pipeline invocations are overdue:</p><ul>" + "".join(
+        f"<li>{_html.escape(_describe(item))}</li>" for item in overdue
+    ) + "</ul>"
+
+    try:
+        _send(email_cfg, recipients, 'IBIS ETL: missed run(s) detected', plain, html)
+        logger.info('Missed-run alert sent to %s (%d invocation(s)).', recipients, len(overdue))
+    except Exception as exc:
+        logger.error("Failed to send missed-run alert: %s", exc)
+
+
 def _build_sms_summary(results: dict[str, 'StageResult']) -> str | None:
     """Build SMS summary section for the pipeline email. Returns None if send_sms didn't run."""
     sms_result = results.get('send_sms')
