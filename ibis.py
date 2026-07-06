@@ -114,7 +114,11 @@ def run_pipeline(
     results: dict[str, StageResult] = {}
     failed: set[str] = set()
 
-    pipeline_run_id = start_pipeline_run(engine, invocation)
+    try:
+        pipeline_run_id = start_pipeline_run(engine, invocation)
+    except Exception as exc:
+        logger.exception(f"Failed to record pipeline_run start (metrics only, continuing): {exc}")
+        pipeline_run_id = None
 
     for name in stages:
         cls = STAGE_CLASSES.get(name) or STANDALONE_STAGE_CLASSES[name]
@@ -136,10 +140,14 @@ def run_pipeline(
             result = StageResult(success=False, errors=[str(exc)])
             logger.exception(f"Stage '{name}' raised an unexpected exception.")
 
-        record_stage_run(
-            engine, pipeline_run_id, name, started_at,
-            success=result.success, rows_written=result.rows_written, errors=result.errors,
-        )
+        if pipeline_run_id is not None:
+            try:
+                record_stage_run(
+                    engine, pipeline_run_id, name, started_at,
+                    success=result.success, rows_written=result.rows_written, errors=result.errors,
+                )
+            except Exception as exc:
+                logger.exception(f"Failed to record stage_run for '{name}' (metrics only, continuing): {exc}")
 
         results[name] = result
         if not result.success:
@@ -151,10 +159,14 @@ def run_pipeline(
 
     total_rows = sum(r.rows_written for r in results.values())
     total_errors = sum(len(r.errors) for r in results.values())
-    finish_pipeline_run(
-        engine, pipeline_run_id,
-        success=len(failed) == 0, rows_written=total_rows, error_count=total_errors,
-    )
+    if pipeline_run_id is not None:
+        try:
+            finish_pipeline_run(
+                engine, pipeline_run_id,
+                success=len(failed) == 0, rows_written=total_rows, error_count=total_errors,
+            )
+        except Exception as exc:
+            logger.exception(f"Failed to record pipeline_run finish (metrics only, continuing): {exc}")
 
     _log_summary(results, failed)
     send_pipeline_report(results=results, stages=stages, engine=engine, config=config)

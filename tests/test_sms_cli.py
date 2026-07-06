@@ -186,3 +186,28 @@ def test_unexpected_exception_records_failed_metrics_and_still_propagates(monkey
     (finish_args, finish_kwargs) = calls['finish'][0]
     assert finish_kwargs['success'] is False
     assert finish_kwargs['error_count'] == 1
+
+
+def test_run_survives_metrics_failure_on_default_send(monkeypatch):
+    """A raising record_stage_run must not mask a successful send run: the
+    process must still exit 0 (the real outcome), not crash from the metrics
+    exception."""
+    monkeypatch.setattr(sms, 'start_pipeline_run', lambda engine, invocation: 1)
+    monkeypatch.setattr(
+        sms, 'record_stage_run',
+        lambda *a, **kw: (_ for _ in ()).throw(RuntimeError('metrics db blip')),
+    )
+    monkeypatch.setattr(sms, 'finish_pipeline_run', lambda *a, **kw: None)
+    monkeypatch.setattr(sms, 'init_schemas', lambda engine: None)
+    monkeypatch.setattr(sms, 'run_migrations', lambda engine: None)
+
+    fake_result = MagicMock(sent=3, failed=0, skipped=1, failures=[])
+    monkeypatch.setattr(sms.SmsProcessor, 'run', lambda self: fake_result)
+
+    config = MagicMock()
+    engine = MagicMock()
+
+    with pytest.raises(SystemExit) as exc_info:
+        _run(_args(), config, engine)
+
+    assert exc_info.value.code == 0

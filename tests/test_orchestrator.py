@@ -247,3 +247,28 @@ def test_run_pipeline_records_failure_and_skips_downstream_without_spurious_reco
     assert len(calls['finish']) == 1
     _, finish_kwargs = calls['finish'][0]
     assert finish_kwargs['success'] is False
+
+
+def test_run_pipeline_survives_metrics_failure(monkeypatch):
+    """A raising record_stage_run must not mask a successful pipeline run:
+    run_pipeline must still complete without raising, still call
+    send_pipeline_report, and must not sys.exit (real success path unaffected
+    by an observability-layer failure)."""
+    import ibis as ibis_module
+
+    monkeypatch.setattr(
+        ibis_module, 'record_stage_run',
+        lambda *a, **kw: (_ for _ in ()).throw(RuntimeError('metrics db blip')),
+    )
+
+    config = MagicMock()
+    engine = MagicMock()
+
+    with patch.object(STAGE_CLASSES['mdb_to_bronze'], 'run',
+                      return_value=StageResult(success=True, rows_written=7)):
+        with patch('ibis.send_pipeline_report') as mock_notify:
+            with patch('sys.exit') as mock_exit:
+                ibis_module.run_pipeline(['mdb_to_bronze'], config, engine)
+
+    mock_notify.assert_called_once()
+    mock_exit.assert_not_called()

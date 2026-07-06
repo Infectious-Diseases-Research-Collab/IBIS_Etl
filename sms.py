@@ -82,7 +82,11 @@ def _run(args, config, engine) -> None:
     run_migrations(engine)  # ensures ops.pipeline_runs/stage_runs exist
 
     invocation = 'sms'
-    pipeline_run_id = start_pipeline_run(engine, invocation)
+    try:
+        pipeline_run_id = start_pipeline_run(engine, invocation)
+    except Exception as exc:
+        logger.exception(f"Failed to record pipeline_run start (metrics only, continuing): {exc}")
+        pipeline_run_id = None
     started_at = datetime.now(timezone.utc)
     stage_name = 'sms_init_db'
     success = True
@@ -185,14 +189,21 @@ def _run(args, config, engine) -> None:
         logger.exception(f"Unexpected error in sms.py ({stage_name}): {exc}")
         raise
     finally:
-        record_stage_run(
-            engine, pipeline_run_id, stage_name, started_at,
-            success=success, rows_written=rows_written, errors=errors,
-        )
-        finish_pipeline_run(
-            engine, pipeline_run_id,
-            success=success, rows_written=rows_written, error_count=len(errors),
-        )
+        if pipeline_run_id is not None:
+            try:
+                record_stage_run(
+                    engine, pipeline_run_id, stage_name, started_at,
+                    success=success, rows_written=rows_written, errors=errors,
+                )
+            except Exception as exc:
+                logger.exception(f"Failed to record stage_run (metrics only, continuing): {exc}")
+            try:
+                finish_pipeline_run(
+                    engine, pipeline_run_id,
+                    success=success, rows_written=rows_written, error_count=len(errors),
+                )
+            except Exception as exc:
+                logger.exception(f"Failed to record pipeline_run finish (metrics only, continuing): {exc}")
 
 
 if __name__ == '__main__':
