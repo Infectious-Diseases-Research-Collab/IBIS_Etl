@@ -4,6 +4,7 @@ import argparse
 import logging
 import sys
 from collections import defaultdict, deque
+from datetime import datetime, timezone
 
 from modules.config import ConfigLoader
 from modules.db import (
@@ -16,6 +17,7 @@ from modules.db import (
     run_migrations,
 )
 from modules.logging_utils import configure_logging
+from modules.metrics import finish_pipeline_run, record_stage_run, start_pipeline_run
 from stages.base import StageResult
 
 from stages.ftp_to_extracted import FtpToExtracted
@@ -106,10 +108,13 @@ def build_run_list(
 
 
 def run_pipeline(
-    stages: list[str], config: ConfigLoader, engine, full_rebuild: bool = False
+    stages: list[str], config: ConfigLoader, engine, full_rebuild: bool = False,
+    invocation: str = '',
 ) -> None:
     results: dict[str, StageResult] = {}
     failed: set[str] = set()
+
+    pipeline_run_id = start_pipeline_run(engine, invocation)
 
     for name in stages:
         cls = STAGE_CLASSES.get(name) or STANDALONE_STAGE_CLASSES[name]
@@ -121,6 +126,7 @@ def run_pipeline(
 
         logger.info(f"=== Running stage: {name} ===")
         stage = cls(config=config, engine=engine)
+        started_at = datetime.now(timezone.utc)
         try:
             if full_rebuild and STAGE_ACCEPTS_FULL_REBUILD.get(name, False):
                 result = stage.run(full_rebuild=True)
@@ -130,6 +136,11 @@ def run_pipeline(
             result = StageResult(success=False, errors=[str(exc)])
             logger.exception(f"Stage '{name}' raised an unexpected exception.")
 
+        record_stage_run(
+            engine, pipeline_run_id, name, started_at,
+            success=result.success, rows_written=result.rows_written, errors=result.errors,
+        )
+
         results[name] = result
         if not result.success:
             failed.add(name)
@@ -137,6 +148,13 @@ def run_pipeline(
                 logger.error(f"  [{name}] {err}")
         else:
             logger.info(f"  [{name}] OK — {result.rows_written} row(s) written.")
+
+    total_rows = sum(r.rows_written for r in results.values())
+    total_errors = sum(len(r.errors) for r in results.values())
+    finish_pipeline_run(
+        engine, pipeline_run_id,
+        success=len(failed) == 0, rows_written=total_rows, error_count=total_errors,
+    )
 
     _log_summary(results, failed)
     send_pipeline_report(results=results, stages=stages, engine=engine, config=config)
@@ -203,7 +221,8 @@ def main() -> None:
             _maybe_init_readonly_role(config, engine)
 
             stages = build_run_list(STAGE_DEPS, run_all=args.all, pipeline=args.pipeline)
-            run_pipeline(stages, config, engine, full_rebuild=args.full_rebuild)
+            invocation = '-a' if args.all else f'-p {args.pipeline}'
+            run_pipeline(stages, config, engine, full_rebuild=args.full_rebuild, invocation=invocation)
     except PipelineLockError as exc:
         logger.error(str(exc))
         sys.exit(1)

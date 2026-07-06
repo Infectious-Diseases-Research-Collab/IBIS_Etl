@@ -178,3 +178,72 @@ def test_run_pipeline_full_rebuild_ignored_by_stages_without_the_kwarg():
             run_pipeline(['mdb_to_bronze'], config, engine, full_rebuild=True)
 
     mock_run.assert_called_once_with()
+
+
+def test_run_pipeline_records_metrics_for_each_stage(monkeypatch):
+    """Every stage executed must produce exactly one record_stage_run call,
+    and the whole invocation must start and finish exactly once."""
+    import ibis as ibis_module
+
+    calls = {'start': [], 'record': [], 'finish': []}
+    monkeypatch.setattr(ibis_module, 'start_pipeline_run', lambda engine, invocation: (calls['start'].append(invocation), 42)[1])
+    monkeypatch.setattr(ibis_module, 'record_stage_run', lambda *a, **kw: calls['record'].append((a, kw)))
+    monkeypatch.setattr(ibis_module, 'finish_pipeline_run', lambda *a, **kw: calls['finish'].append((a, kw)))
+
+    config = MagicMock()
+    engine = MagicMock()
+
+    class FakeStage:
+        dependencies: list[str] = []
+        def __init__(self, config, engine):
+            pass
+        def run(self):
+            return StageResult(success=True, rows_written=5)
+
+    monkeypatch.setitem(ibis_module.STAGE_CLASSES, 'fake_stage', FakeStage)
+    monkeypatch.setattr(ibis_module, 'send_pipeline_report', lambda **kw: None)
+
+    ibis_module.run_pipeline(['fake_stage'], config, engine, invocation='-p fake_stage')
+
+    assert calls['start'] == ['-p fake_stage']
+    assert len(calls['record']) == 1
+    _, record_kwargs = calls['record'][0]
+    assert record_kwargs['success'] is True
+    assert record_kwargs['rows_written'] == 5
+    assert len(calls['finish']) == 1
+    _, finish_kwargs = calls['finish'][0]
+    assert finish_kwargs['success'] is True
+    assert finish_kwargs['rows_written'] == 5
+
+
+def test_run_pipeline_records_failure_and_skips_downstream_without_spurious_record(monkeypatch):
+    """finish_pipeline_run's success must reflect ANY failed stage, and a stage
+    skipped due to an upstream failure must NOT get its own record_stage_run call."""
+    import ibis as ibis_module
+
+    calls = {'start': [], 'record': [], 'finish': []}
+    monkeypatch.setattr(ibis_module, 'start_pipeline_run', lambda engine, invocation: (calls['start'].append(invocation), 99)[1])
+    monkeypatch.setattr(ibis_module, 'record_stage_run', lambda *a, **kw: calls['record'].append((a, kw)))
+    monkeypatch.setattr(ibis_module, 'finish_pipeline_run', lambda *a, **kw: calls['finish'].append((a, kw)))
+    monkeypatch.setattr(ibis_module, 'send_pipeline_report', lambda **kw: None)
+
+    config = MagicMock()
+    engine = MagicMock()
+
+    with patch.object(STAGE_CLASSES['mdb_to_bronze'], 'run',
+                      return_value=StageResult(success=False, errors=['boom'])):
+        with patch('sys.exit'):
+            ibis_module.run_pipeline(
+                ['mdb_to_bronze', 'bronze_to_silver'], config, engine, invocation='-a',
+            )
+
+    assert calls['start'] == ['-a']
+    # Only the executed stage (mdb_to_bronze) gets a record; bronze_to_silver
+    # is skipped due to the upstream failure and must not be recorded.
+    assert len(calls['record']) == 1
+    record_args, record_kwargs = calls['record'][0]
+    assert record_args[2] == 'mdb_to_bronze'
+    assert record_kwargs['success'] is False
+    assert len(calls['finish']) == 1
+    _, finish_kwargs = calls['finish'][0]
+    assert finish_kwargs['success'] is False
