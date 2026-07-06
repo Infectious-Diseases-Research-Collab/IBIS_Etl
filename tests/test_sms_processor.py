@@ -422,6 +422,24 @@ def test_count_recent_failures_returns_scalar_count():
     assert call_args[0][1] == {'subjid': 'IBIS001', 'week': 8}
 
 
+def test_count_recent_failures_query_windows_by_last_resend():
+    """Regression guard: the mock-based tests above only check the returned
+    scalar, not the SQL text, so they'd pass even if this reverted to the old
+    all-time (unwindowed) count. Assert the executed query actually windows
+    by sms.resend_log so a manual --resend gets a fresh retry budget."""
+    from modules.sms_processor import SmsProcessor
+
+    engine, conn = make_engine_mock()
+    conn.execute.return_value.scalar.return_value = 0
+
+    processor = SmsProcessor(config=make_config(), engine=engine)
+    processor._count_recent_failures('IBIS001', 8)
+
+    executed_sql = str(conn.execute.call_args[0][0])
+    assert 'resend_log' in executed_sql
+    assert 'created_at' in executed_sql
+
+
 def test_send_due_messages_resets_to_pending_when_under_retry_cap():
     from modules.sms_processor import SmsProcessor
 

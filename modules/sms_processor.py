@@ -357,9 +357,21 @@ class SmsProcessor:
             )
 
     def _count_recent_failures(self, subjid: str, week: int) -> int:
+        """
+        Count 'failed' sms.log rows for (subjid, week), windowed to only those
+        since the most recent manual --resend (or all-time if never resent).
+        This gives every manual resend a fresh _MAX_AUTO_RETRIES budget instead
+        of being immediately re-flagged 'failed' by stale historical failures
+        from before the resend.
+        """
         with self._engine.connect() as conn:
             count = conn.execute(text("""
-                SELECT COUNT(*) FROM sms.log WHERE subjid = :subjid AND week = :week AND status = 'failed'
+                SELECT COUNT(*) FROM sms.log
+                WHERE subjid = :subjid AND week = :week AND status = 'failed'
+                AND created_at > COALESCE(
+                    (SELECT MAX(resent_at) FROM sms.resend_log WHERE subjid = :subjid AND week = :week),
+                    '1970-01-01'::timestamp
+                )
             """), {"subjid": subjid, "week": week}).scalar()
         return count or 0
 
