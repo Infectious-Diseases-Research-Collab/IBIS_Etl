@@ -40,7 +40,7 @@ def _validate_table_name(name: str) -> str:
     return name
 
 
-def _reconcile_columns(conn, table: str) -> None:
+def _reconcile_columns(conn, table: str) -> list[str]:
     """
     store_ibis.<table> is append-only and never rebuilt — if ibis.<table>
     gains a column after store_ibis.<table> was first created, the append
@@ -49,10 +49,19 @@ def _reconcile_columns(conn, table: str) -> None:
     every snapshot attempt. Adding a column to a partitioned parent table
     in Postgres automatically applies to all its existing child partitions
     too, so this is safe to run against an already-partitioned table.
+
+    Returns ibis.<table>'s column names in ordinal order. ALTER TABLE ADD
+    COLUMN always appends the new column at the *end* of the physical
+    column order — it cannot restore ibis.<table>'s original ordinal
+    position — so the caller must build a name-keyed INSERT (an explicit
+    column list on both sides) rather than relying on SELECT * with
+    positional matching, which would silently misalign values into the
+    wrong columns once a reconciled column's physical position diverges
+    from its ibis ordinal position.
     """
     ibis_cols = conn.execute(text(
         "SELECT column_name, data_type FROM information_schema.columns "
-        "WHERE table_schema = 'ibis' AND table_name = :t"
+        "WHERE table_schema = 'ibis' AND table_name = :t ORDER BY ordinal_position"
     ), {'t': table}).fetchall()
     store_cols = {
         row[0] for row in conn.execute(text(
@@ -69,6 +78,7 @@ def _reconcile_columns(conn, table: str) -> None:
                 f"  Added missing column '{col_name}' to store_ibis.{table} "
                 f"(schema drift reconciliation)."
             )
+    return [c[0] for c in ibis_cols]
 
 
 class StoreIbis(BaseStage):
@@ -138,7 +148,7 @@ class StoreIbis(BaseStage):
             migrate_to_partitioned(conn, 'store_ibis', table, 'snapshot_date')
             logger.info(f"  Migration complete: store_ibis.{table} is now partitioned.")
 
-        _reconcile_columns(conn, table)
+        ibis_col_names = _reconcile_columns(conn, table)
 
         ensure_month_partition(conn, 'store_ibis', table, today)
 
@@ -171,8 +181,10 @@ class StoreIbis(BaseStage):
                 f'DELETE FROM store_ibis."{table}" WHERE snapshot_date = :d'
             ), {'d': today})
 
+        col_list = ', '.join(f'"{c}"' for c in ibis_col_names)
         conn.execute(text(
-            f'INSERT INTO store_ibis."{table}" SELECT *, :d AS snapshot_date FROM ibis."{table}"'
+            f'INSERT INTO store_ibis."{table}" ({col_list}, snapshot_date) '
+            f'SELECT {col_list}, :d FROM ibis."{table}"'
         ), {'d': today})
         logger.info(f"  Snapshotted: ibis.{table} → store_ibis.{table}")
 

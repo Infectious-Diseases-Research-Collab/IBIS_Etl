@@ -114,6 +114,10 @@ def test_store_ibis_appends_snapshot_with_bound_date_param():
         if 'INSERT INTO store_ibis."d_participant"' in str(c.args[0])
     ]
     assert len(insert_calls) == 1
+    insert_sql = str(insert_calls[0].args[0])
+    assert '("uniqueid", "value", snapshot_date)' in insert_sql
+    assert 'SELECT "uniqueid", "value", :d' in insert_sql
+    assert 'SELECT *' not in insert_sql
     assert insert_calls[0].args[1] == {'d': date(2026, 4, 13)}
 
 
@@ -212,7 +216,17 @@ def test_snapshot_table_adds_missing_column_when_ibis_schema_has_grown():
     """store_ibis.<table> is append-only and never rebuilt — if ibis.<table>
     gains a column after store_ibis.<table> was first created, the next
     snapshot must reconcile the schema (ALTER TABLE ADD COLUMN) rather than
-    fail with an INSERT column-count mismatch."""
+    fail with an INSERT column-count mismatch.
+
+    Critically, ALTER TABLE ADD COLUMN always appends the new column at the
+    *end* of store_ibis.<table>'s physical column order — it cannot restore
+    ibis.<table>'s original ordinal position (here, run_uuid is 2nd in ibis
+    but would land 3rd, after snapshot_date, in store_ibis's storage order).
+    So it's not enough to check that an ALTER TABLE was issued: the INSERT
+    itself must use an explicit, name-keyed column list — not `SELECT *` —
+    with run_uuid in its ibis-ordinal position, so Postgres matches values
+    by name rather than by physical position and isn't misled by where the
+    reconciled column actually landed in storage."""
     engine, mock_conn = _make_engine(_base_side_effect(
         store_exists=True,
         columns=[('uniqueid', 'text'), ('run_uuid', 'text')],
@@ -232,6 +246,19 @@ def test_snapshot_table_adds_missing_column_when_ibis_schema_has_grown():
         'ALTER TABLE store_ibis."d_participant"' in s and 'ADD COLUMN IF NOT EXISTS "run_uuid"' in s
         for s in executed_sql
     )
+
+    insert_calls = [
+        c for c in mock_conn.execute.call_args_list
+        if 'INSERT INTO store_ibis."d_participant"' in str(c.args[0])
+    ]
+    assert len(insert_calls) == 1
+    insert_sql = str(insert_calls[0].args[0])
+    assert 'SELECT *' not in insert_sql
+    # Column list must match ibis's ordinal order (uniqueid, run_uuid), with
+    # snapshot_date appended explicitly at the end of both lists — NOT
+    # store_ibis's post-ALTER physical order (uniqueid, snapshot_date, run_uuid).
+    assert '("uniqueid", "run_uuid", snapshot_date)' in insert_sql
+    assert 'SELECT "uniqueid", "run_uuid", :d' in insert_sql
 
 
 def test_snapshot_table_skips_reconciliation_when_no_columns_missing():
@@ -253,6 +280,16 @@ def test_snapshot_table_skips_reconciliation_when_no_columns_missing():
     assert result.success
     executed_sql = [str(c.args[0]) for c in mock_conn.execute.call_args_list]
     assert not any('ALTER TABLE store_ibis."d_participant" ADD COLUMN' in s for s in executed_sql)
+
+    insert_calls = [
+        c for c in mock_conn.execute.call_args_list
+        if 'INSERT INTO store_ibis."d_participant"' in str(c.args[0])
+    ]
+    assert len(insert_calls) == 1
+    insert_sql = str(insert_calls[0].args[0])
+    assert 'SELECT *' not in insert_sql
+    assert '("uniqueid", "run_uuid", snapshot_date)' in insert_sql
+    assert 'SELECT "uniqueid", "run_uuid", :d' in insert_sql
 
 
 def test_store_ibis_retires_partitions_past_retention_window():
