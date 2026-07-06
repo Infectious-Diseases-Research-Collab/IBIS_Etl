@@ -48,6 +48,21 @@ docker compose run --rm etl python ibis.py -p bronze_to_silver --full-rebuild
 
 The `ReconcileSilver` stage (described in the Architecture table above) runs weekly as a safety net, comparing the incrementally-maintained `silver_ibis` against a fresh rebuild to detect drift. For the full design rationale, see [Design Specification](docs/superpowers/specs/2026-07-03-incremental-silver-gold-design.md).
 
+---
+
+## Structured logging and pipeline metrics
+
+Logs are JSON (one object per line: `timestamp`, `level`, `logger`, `message`, plus any extra fields a call site attaches) instead of the previous plain-text format — the log files under `/var/log/ibis/` now contain JSON lines, not free text, so `tail -f` output looks different but `jq` becomes usable for filtering.
+
+Every pipeline invocation (`ibis.py -a`/`-p <stage>`, and every `sms.py` command) is recorded in two new tables: `ops.pipeline_runs` (one row per invocation — what ran, when, overall success, total rows) and `ops.stage_runs` (one row per individual stage/command execution — timing, success, rows written, errors). This is queryable operational history with no new infrastructure beyond the existing database, e.g.:
+
+```sql
+SELECT stage_name, success, rows_written, finished_at - started_at AS duration
+FROM ops.stage_runs
+ORDER BY started_at DESC
+LIMIT 20;
+```
+
 ### Gold Layer Lineage
 
 `gold_ibis.baseline`, `gold_ibis.followup`, and `gold_ibis.d_enrollment` carry a `run_uuid` column — a lineage join key back to `bronze_ibis.meta` or `silver_ibis.<table>_history` for tracing which extraction run produced a given row's current values. `ibis` picks this up automatically since it's rebuilt (blue-green) from `gold_ibis` every run. `store_ibis` is different: it's append-only and never rebuilt, so it can't just inherit new columns from a fresh copy the way `ibis` does. Instead, `StoreIbis._snapshot_table` calls a `_reconcile_columns` step before every snapshot that diffs `ibis.<table>`'s columns against `store_ibis.<table>`'s and adds (via `ALTER TABLE ... ADD COLUMN IF NOT EXISTS`) any that are missing — including on already-partitioned tables, since Postgres applies a parent-table column addition to all existing child partitions automatically. This keeps `store_ibis` in sync with `ibis`'s schema (`run_uuid` included) without requiring a rebuild or a manual migration whenever a new column like this one is added upstream. Other ETL-internal tracking columns (`file_name`, `file_path`, `extracted_at`, `updated_at`) are still dropped at the gold layer to keep production tables free of raw file-path/timestamp noise for the PIs and analysts who query them directly.
