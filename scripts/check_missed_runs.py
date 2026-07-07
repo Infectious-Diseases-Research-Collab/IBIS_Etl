@@ -15,9 +15,13 @@ Usage:
 from __future__ import annotations
 
 import logging
+import sys
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 
 from sqlalchemy import text
+
+sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from modules.config import ConfigLoader
 from modules.db import create_db_engine
