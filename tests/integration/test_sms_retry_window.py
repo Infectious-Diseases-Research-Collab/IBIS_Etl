@@ -14,11 +14,14 @@ def _make_processor(engine):
 
 def test_count_recent_failures_ignores_failures_before_last_resend(clean_engine):
     """Reproduces the exact bug scenario from the code review: a subjid/week
-    hits the retry cap (3 failures), a data manager runs --resend after fixing
-    the phone number, and the resend itself fails once more. The count used to
-    decide auto-retry-vs-give-up must reflect only failures since that resend
-    (1), not the stale all-time total (4) — otherwise the participant is
-    silently re-flagged 'failed' and falls out of auto-retry forever."""
+    accumulates several historical failures, a data manager runs --resend
+    after fixing the phone number, and the resend itself fails once more. The
+    count used to decide auto-retry-vs-give-up must reflect only failures
+    since that resend (1), not the stale all-time total — otherwise the
+    participant is silently re-flagged 'failed' and falls out of auto-retry
+    forever. The windowing query being tested here doesn't depend on the
+    current value of _MAX_AUTO_RETRIES; 3 historical failures is just
+    illustrative, larger-than-any-plausible-cap test data."""
     subjid, week = 'SUBJ100', 8
     now = datetime.now(timezone.utc)
 
@@ -28,7 +31,7 @@ def test_count_recent_failures_ignores_failures_before_last_resend(clean_engine)
             VALUES (:subjid, '256700000100', 'HIV Risk Assessment', 'English', :week, CURRENT_DATE)
         """), {"subjid": subjid, "week": week})
 
-        # Three historical failures that already hit the old retry cap.
+        # Several historical failures, predating the resend below.
         for i in range(3):
             conn.execute(text("""
                 INSERT INTO sms.log (subjid, mobile_number, week, message_text, attempt, status, error_message, created_at)

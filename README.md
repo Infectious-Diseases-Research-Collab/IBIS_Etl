@@ -21,7 +21,7 @@ SFTP server → Downloads/ → Extracted/  →  bronze_ibis  →  silver_ibis  �
 | 4 | `TransformIbis` | Executes SQL files in `sql/transform/` to build dimension tables in `gold_ibis`. |
 | 5 | `MeasuresIbis` | Runs 24 data-quality checks via `DataValidator`, writes results to `gold_ibis.ds_validation_report`. Executes SQL files in `sql/measures/`. |
 | 6 | `PromoteIbis` | Atomically copies all `gold_ibis` tables to the production `ibis` schema. |
-| 7 | `SendSms` | Syncs `sms.queue` from `ibis.baseline`, then sends due SMS messages to Uganda participants via BLASTA. See [SMS.md](SMS.md). |
+| 7 | `SendSms` | Syncs `sms.queue` from `ibis.baseline`, then sends due SMS messages to Uganda participants via BLASTA. Failed sends auto-retry up to 2 times across subsequent runs before requiring manual `--resend`. See [SMS.md](SMS.md#retrying-failed-messages). |
 | 8 | `StoreIbis` | Appends a dated snapshot of each `ibis` table into `store_ibis` (idempotent — skips if today's snapshot already exists). |
 | — | `ReconcileSilver` | Weekly drift-detection safety net: rebuilds `silver_ibis` from scratch into a throwaway shadow table and diffs it against the live incrementally-maintained table. Never auto-corrects — only reports drift. Deliberately **not** part of `-a`; runs on its own `reconcile_cron` schedule via `python ibis.py -p reconcile_silver`. |
 
@@ -71,7 +71,7 @@ LIMIT 20;
 
 ## Missed-run alerting
 
-`scripts/check_missed_runs.py` runs on its own schedule (`sla_check_cron`, every 4 hours by default) and checks `ops.pipeline_runs` for whether each scheduled invocation (`ibis.py -a`, `store_ibis`, `sms --check-delivery`, `sms --weekly-report`, `reconcile_silver`) has actually run recently enough — 26 hours for daily jobs, 8.5 days for weekly ones. This catches the case existing per-run alerts (`send_pipeline_report`, `send_sms_flagged_alert`) can't: the cron job never firing at all. It's silent when everything is on schedule. `scripts/backup_db.sh` and `scripts/export_ug_incentive_arm.py` are standalone scripts that don't record into `ops.pipeline_runs` and are not covered by this check.
+`scripts/check_missed_runs.py` runs on its own schedule (`sla_check_cron`, every 4 hours by default) and checks `ops.pipeline_runs` for whether each scheduled invocation (`-a`, `-p store_ibis`, `sms --check-delivery`, `sms --weekly-report`, `-p reconcile_silver` — these must exactly match the strings `ibis.py`/`sms.py` actually record; see `_TRACKED_INVOCATIONS` in the script) has actually run recently enough — 26 hours for daily jobs, 8.5 days for weekly ones. This catches the case existing per-run alerts (`send_pipeline_report`, `send_sms_flagged_alert`) can't: the cron job never firing at all. It's silent when everything is on schedule. `scripts/backup_db.sh` and `scripts/export_ug_incentive_arm.py` are standalone scripts that don't record into `ops.pipeline_runs` and are not covered by this check.
 
 **Note for a fresh deploy:** the very first check cycle after deploying this may report jobs as overdue simply because they haven't run yet in the new `ops.pipeline_runs` table's short history — allow each tracked job's first scheduled run to complete before treating an alert as real.
 
@@ -222,7 +222,7 @@ The next pipeline run creates (or updates the password of) `ibis_readonly` and g
 | `excluded_tablets` | List of tablet IDs to skip during ingestion |
 | `db` | PostgreSQL connection details (`host`, `port`, `name`, `user`, `password_secret_file`, optional `readonly_password_secret_file` — see [Read-only reporting access](#read-only-reporting-access)) |
 | `trial` | `dedup_key`, `country_code_map` (country → integer countrycode) |
-| `schedule` | `pipeline_cron`, `store_cron`, `dlr_cron`, `sms_weekly_report_cron`, `incentive_report_cron`, `backup_cron`, `reconcile_cron` in standard cron format (UTC) |
+| `schedule` | `pipeline_cron`, `store_cron`, `dlr_cron`, `sms_weekly_report_cron`, `incentive_report_cron`, `backup_cron`, `reconcile_cron`, `sla_check_cron` in standard cron format (UTC) |
 | `email` | *(optional)* SMTP settings for pipeline notifications — see below |
 
 `password_secret_file` points to the Docker secret mounted at `/run/secrets/db_password` — the password never appears in `config.json` or environment variables.
@@ -365,7 +365,8 @@ pytest -m integration
 ## Deployment notes
 
 - The `db` service uses a named Docker volume (`pgdata`) so data persists across container restarts.
-- Logs are written inside the container under `/var/log/ibis/`: `pipeline.log`, `store.log`, `dlr.log`, `sms_report.log`, `incentive_report.log`, `backup.log`, `reconcile.log`. Mount a host volume or use `docker compose logs` to access them.
-- To change the cron schedule, edit `config.json` and run `docker compose restart etl`.
+- Logs are written inside the container under `/var/log/ibis/`: `pipeline.log`, `store.log`, `dlr.log`, `sms_report.log`, `incentive_report.log`, `backup.log`, `reconcile.log`, `sla_check.log`. Mount a host volume or use `docker compose logs` to access them.
+- To change the cron schedule, edit `config.json` and run `docker compose restart etl`. All keys listed under [Configuration](#configuration) are required — a missing one causes `entrypoint.sh` to fail on startup with `FATAL: <VAR> is empty`, so when a new schedule key is added, update the real deployed `config.json` (not just `config.json.example`) before rebuilding/restarting.
+- The `etl` container has a memory limit (`docker-compose.yml`'s `deploy.resources.limits.memory`, currently 4G). `bronze_to_silver` loads its whole unpromoted backlog into memory at once — if incremental promotion has been stalled for a while (e.g., after a database outage), that backlog can grow large enough to need raising this limit. Check `docker inspect <container> --format='{{.State.OOMKilled}}'` if a run dies with no error in the log.
 - The pipeline is idempotent: re-running after a partial failure will skip already-extracted tablets, already-loaded MDB files, and already-snapshotted store tables.
 - Tablet archives (`.7z`) are deleted from `Downloads/` after successful extraction. The originals on the SFTP server are never modified.
