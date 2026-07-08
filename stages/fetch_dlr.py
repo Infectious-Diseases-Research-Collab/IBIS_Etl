@@ -32,8 +32,9 @@ class FetchDlr(BaseStage):
         )
 
         flagged = processor.get_flagged_messages()
+        flagged_alert_sent = None
         if flagged:
-            send_sms_flagged_alert(flagged, self.config, self.engine)
+            flagged_alert_sent = send_sms_flagged_alert(flagged, self.config, self.engine)
 
         errors = [
             f"log_id={e['log_id']} subjid={e.get('subjid','')} msg_id={e.get('provider_message_id','')}: {e['error']}"
@@ -58,5 +59,6 @@ class FetchDlr(BaseStage):
                 'pending': dlr.pending,
                 'errors': dlr.errors,
                 'flagged': len(flagged),
+                'flagged_alert_sent': flagged_alert_sent,
             },
         )

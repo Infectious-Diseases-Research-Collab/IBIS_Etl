@@ -154,7 +154,12 @@ def _run(args, config, engine) -> None:
                 meta.get('pending', 0), len(meta.get('errors', [])),
             )
             if meta.get('flagged'):
-                logger.info('%d message(s) flagged — alert sent to data manager.', meta['flagged'])
+                if meta.get('flagged_alert_sent'):
+                    logger.info('%d message(s) flagged — alert sent to data manager.', meta['flagged'])
+                else:
+                    logger.warning(
+                        '%d message(s) flagged — alert FAILED to send to data manager.', meta['flagged'],
+                    )
             success = result.success
             rows_written = meta.get('updated', 0)
             errors = result.errors

@@ -58,6 +58,7 @@ def test_fetch_dlr_stage_sends_alert_when_flagged_messages_exist():
 
     with patch('stages.fetch_dlr.SmsProcessor') as MockProc, \
          patch('stages.fetch_dlr.send_sms_flagged_alert') as mock_alert:
+        mock_alert.return_value = True
         MockProc.return_value.fetch_delivery_statuses.return_value = DlrResult(
             checked=1, updated=0, pending=0, errors=[]
         )
@@ -65,6 +66,33 @@ def test_fetch_dlr_stage_sends_alert_when_flagged_messages_exist():
         result = stage.run()
 
     mock_alert.assert_called_once_with(flagged, cfg, engine)
+    assert result.metadata['flagged_alert_sent'] is True
+
+
+def test_fetch_dlr_stage_records_flagged_alert_failure_in_metadata():
+    """A flagged-alert email that fails to send must be reflected in the
+    stage's metadata (flagged_alert_sent=False), not silently look the same
+    as a successful send — sms.py relies on this to log an accurate outcome."""
+    from stages.fetch_dlr import FetchDlr
+    from modules.sms_processor import DlrResult
+
+    engine = make_engine_mock()
+    cfg = make_config()
+    stage = FetchDlr(config=cfg, engine=engine)
+
+    flagged = [{'subjid': 'IBIS001', 'health_facility_ug': '14', 'week': 8, 'last_error': 'timeout'}]
+
+    with patch('stages.fetch_dlr.SmsProcessor') as MockProc, \
+         patch('stages.fetch_dlr.send_sms_flagged_alert') as mock_alert:
+        mock_alert.return_value = False
+        MockProc.return_value.fetch_delivery_statuses.return_value = DlrResult(
+            checked=1, updated=1, pending=0, errors=[]
+        )
+        MockProc.return_value.get_flagged_messages.return_value = flagged
+        result = stage.run()
+
+    assert result.metadata['flagged_alert_sent'] is False
+    assert result.success is True  # a failed notification doesn't fail the stage's core work
 
 
 def test_fetch_dlr_stage_returns_failure_when_all_errored():

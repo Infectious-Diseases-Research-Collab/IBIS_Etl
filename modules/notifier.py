@@ -755,20 +755,24 @@ def send_sms_weekly_report(engine, config) -> None:
     logger.info('Weekly SMS report sent to %s.', uganda_recipients)
 
 
-def send_sms_flagged_alert(flagged: list[dict], config, engine) -> None:
+def send_sms_flagged_alert(flagged: list[dict], config, engine) -> bool:
     """
     Send daily alert to data manager listing messages that never reached Blasta.
     Only called when flagged is non-empty.
+
+    Returns True only if the alert was actually sent, False otherwise (no
+    email config, no recipients, or an SMTP failure) — the caller (FetchDlr)
+    uses this to log an accurate outcome rather than assuming success.
     """
     from datetime import date
     email_cfg = config.get('email')
     if not email_cfg:
-        return
+        return False
 
     dm_recipients = email_cfg.get('sms_dm_recipients', [])
     if not dm_recipients:
         logger.warning("No sms_dm_recipients configured — flagged alert not sent.")
-        return
+        return False
 
     today_str = date.today().strftime('%d %b %Y')
     subject = f'IBIS SMS \u2014 Action Required: {today_str}'
@@ -817,6 +821,8 @@ def send_sms_flagged_alert(flagged: list[dict], config, engine) -> None:
 
     try:
         _send(email_cfg, dm_recipients, subject, plain, html)
-        logger.info('Flagged SMS alert sent to %s (%d messages).', dm_recipients, len(flagged))
     except Exception as exc:
         logger.error('Flagged SMS alert email failed: %s', exc)
+        return False
+    logger.info('Flagged SMS alert sent to %s (%d messages).', dm_recipients, len(flagged))
+    return True

@@ -318,12 +318,48 @@ def test_send_sms_flagged_alert_skips_when_no_recipients(tmp_path):
     config = _config(email_cfg)
 
     with patch('smtplib.SMTP') as mock_smtp_cls:
-        send_sms_flagged_alert(
+        sent = send_sms_flagged_alert(
             [{'subjid': 'X', 'health_facility_ug': '11', 'week': 8, 'last_error': 'e'}],
             config, engine=MagicMock(),
         )
 
     mock_smtp_cls.assert_not_called()
+    assert sent is False
+
+
+def test_send_sms_flagged_alert_returns_true_on_success(tmp_path):
+    """Reproduces a real production incident: FetchDlr logged 'alert sent to
+    data manager' even though the send had actually failed with Connection
+    refused, because send_sms_flagged_alert swallowed its own SMTP error and
+    returned None either way — the caller had no way to tell success from
+    failure. It must now return an accurate bool."""
+    from modules.notifier import send_sms_flagged_alert
+
+    email_cfg = _make_email_cfg(tmp_path)
+    email_cfg['sms_dm_recipients'] = ['dm@example.com']
+    config = _config(email_cfg)
+    flagged = [{'subjid': 'IBIS001', 'health_facility_ug': '11', 'week': 8, 'last_error': 'timeout'}]
+
+    mock_smtp_instance = MagicMock()
+    with patch('smtplib.SMTP') as mock_smtp_cls:
+        mock_smtp_cls.return_value.__enter__.return_value = mock_smtp_instance
+        sent = send_sms_flagged_alert(flagged, config, engine=MagicMock())
+
+    assert sent is True
+
+
+def test_send_sms_flagged_alert_returns_false_on_smtp_error(tmp_path):
+    from modules.notifier import send_sms_flagged_alert
+
+    email_cfg = _make_email_cfg(tmp_path)
+    email_cfg['sms_dm_recipients'] = ['dm@example.com']
+    config = _config(email_cfg)
+    flagged = [{'subjid': 'IBIS001', 'health_facility_ug': '11', 'week': 8, 'last_error': 'timeout'}]
+
+    with patch('smtplib.SMTP', side_effect=smtplib.SMTPException('conn refused')):
+        sent = send_sms_flagged_alert(flagged, config, engine=MagicMock())
+
+    assert sent is False
 
 
 def test_build_sms_summary_shows_sent_failed_skipped():

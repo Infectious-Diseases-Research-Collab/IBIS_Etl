@@ -56,6 +56,30 @@ def test_check_delivery_exits_nonzero_when_stage_fails():
     assert exc_info.value.code == 1
 
 
+def test_check_delivery_warns_when_flagged_alert_failed_to_send(caplog):
+    """Reproduces a real production incident: the flagged-message alert
+    email failed with Connection refused, but sms.py logged 'alert sent to
+    data manager' anyway because it never checked whether the send actually
+    succeeded. FetchDlr's flagged_alert_sent=False must now produce a
+    warning, not a false claim of success."""
+    config = MagicMock()
+    engine = MagicMock()
+
+    with patch('sms.FetchDlr') as MockFetchDlr:
+        MockFetchDlr.return_value.run.return_value = StageResult(
+            success=True, rows_written=3,
+            metadata={
+                'checked': 3, 'updated': 3, 'pending': 0, 'errors': [],
+                'flagged': 2, 'flagged_alert_sent': False,
+            },
+        )
+        with pytest.raises(SystemExit):
+            _run(_args(check_delivery=True), config, engine)
+
+    assert 'alert FAILED to send' in caplog.text
+    assert 'alert sent to data manager' not in caplog.text
+
+
 def test_check_delivery_records_invocation_with_flag_suffix(monkeypatch):
     """ops.pipeline_runs.invocation must distinguish --check-delivery from
     every other sms.py command (and from a bare 'sms') so
