@@ -236,6 +236,34 @@ def test_send_pipeline_report_does_not_raise_on_smtp_error(tmp_path):
 
 
 # ---------------------------------------------------------------------------
+# send_sms_weekly_report
+# ---------------------------------------------------------------------------
+
+def test_send_sms_weekly_report_raises_on_smtp_error(tmp_path):
+    """Unlike send_pipeline_report, sending the report IS the entire point
+    of this invocation — there's no other useful work whose success should
+    be preserved independently of the email outcome. An SMTP failure here
+    must propagate so sms.py's --weekly-report command correctly reports
+    failure (success=False, non-zero exit) instead of silently swallowing
+    a report that never went out."""
+    from modules.notifier import send_sms_weekly_report
+
+    email_cfg = _make_email_cfg(tmp_path)
+    email_cfg['sms_dm_recipients'] = ['dm@example.com']
+    config = _config(email_cfg)
+
+    weekly_row = {'health_facility_ug': '11', 'week': 8, 'sent': 1, 'failed': 0, 'skipped': 0}
+
+    with patch('modules.sms_processor.SmsProcessor.get_weekly_report_data', return_value=[weekly_row]), \
+         patch('modules.sms_processor.SmsProcessor.get_cumulative_report_data', return_value=[]), \
+         patch('modules.sms_processor.SmsProcessor.get_delivery_linelist', return_value=[]), \
+         patch('modules.notifier._query_followup_due', return_value=[]), \
+         patch('smtplib.SMTP', side_effect=smtplib.SMTPException('conn refused')):
+        with pytest.raises(smtplib.SMTPException):
+            send_sms_weekly_report(engine=MagicMock(), config=config)
+
+
+# ---------------------------------------------------------------------------
 # _build_sms_summary
 # ---------------------------------------------------------------------------
 

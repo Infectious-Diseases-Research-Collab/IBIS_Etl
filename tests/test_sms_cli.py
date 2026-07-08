@@ -233,6 +233,40 @@ def test_unexpected_exception_records_failed_metrics_and_still_propagates(monkey
     assert finish_kwargs['error_count'] == 1
 
 
+def test_weekly_report_failure_is_recorded_as_failed_not_success(monkeypatch):
+    """send_sms_weekly_report failing (e.g. an SMTP error) must be recorded
+    as a failed stage_run/pipeline_run, not silently reported as success —
+    this is the entire deliverable of --weekly-report, so its failure is
+    the invocation's failure. Reproduces a real production incident: the
+    weekly report's email failed with 'Connection refused' but
+    ops.pipeline_runs still showed success=True, because
+    send_sms_weekly_report used to swallow its own SMTP exception."""
+    calls = {'record': [], 'finish': []}
+    monkeypatch.setattr(sms, 'start_pipeline_run', lambda engine, invocation: 1)
+    monkeypatch.setattr(sms, 'record_stage_run', lambda *a, **kw: calls['record'].append((a, kw)))
+    monkeypatch.setattr(sms, 'finish_pipeline_run', lambda *a, **kw: calls['finish'].append((a, kw)))
+    monkeypatch.setattr(sms, 'init_schemas', lambda engine: None)
+    monkeypatch.setattr(sms, 'run_migrations', lambda engine: None)
+
+    def boom(engine, config):
+        raise RuntimeError('conn refused')
+
+    monkeypatch.setattr(sms, 'send_sms_weekly_report', boom)
+
+    config = MagicMock()
+    engine = MagicMock()
+
+    with pytest.raises(RuntimeError, match='conn refused'):
+        _run(_args(weekly_report=True), config, engine)
+
+    (record_args, record_kwargs) = calls['record'][0]
+    assert record_kwargs['success'] is False
+    assert record_kwargs['errors'] == ['conn refused']
+
+    (finish_args, finish_kwargs) = calls['finish'][0]
+    assert finish_kwargs['success'] is False
+
+
 def test_run_survives_metrics_failure_on_default_send(monkeypatch):
     """A raising record_stage_run must not mask a successful send run: the
     process must still exit 0 (the real outcome), not crash from the metrics

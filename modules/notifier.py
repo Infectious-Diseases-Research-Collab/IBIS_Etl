@@ -744,14 +744,15 @@ def send_sms_weekly_report(engine, config) -> None:
                                'Mobile', 'Scheduled Date', 'Sent At (EAT)', 'Delivery Status']
     linelist_filename = f'ibis_sms_linelist_{this_tuesday.strftime("%Y-%m-%d")}.csv'
 
+    extra = [(linelist_df, linelist_filename)] if linelist_df is not None else []
     try:
-        extra = [(linelist_df, linelist_filename)] if linelist_df is not None else []
         _send(email_cfg, uganda_recipients, subject, plain, html,
               attachment_df=attachment_df, attachment_filename=csv_filename,
               extra_attachments=extra)
-        logger.info('Weekly SMS report sent to %s.', uganda_recipients)
     except Exception as exc:
         logger.error('Weekly SMS report email failed: %s', exc)
+        raise
+    logger.info('Weekly SMS report sent to %s.', uganda_recipients)
 
 
 def send_sms_flagged_alert(flagged: list[dict], config, engine) -> None:
