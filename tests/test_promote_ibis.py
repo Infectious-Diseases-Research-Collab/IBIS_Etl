@@ -106,3 +106,30 @@ def test_promote_reports_formatted_error_not_bare_exception():
     assert len(result.errors) == 1
     assert "Failed to promote 'd_participant'" in result.errors[0]
     assert 'disk full' in result.errors[0]
+
+
+def test_promote_recreates_multi_column_dependent_view_only_once():
+    """A view that references a promoted table through more than one column
+    (e.g. sms.message_status joining on ibis.baseline.subjid and also
+    selecting ibis.baseline.health_facility_ug) gets one pg_depend row per
+    dependent column, not one per view. Without de-duplication, the same
+    view is dropped-and-recreated by CASCADE once but CREATE OR REPLACE
+    VIEW runs once per row — redundant, harmless work that should still be
+    collapsed to a single recreation."""
+    engine = MagicMock()
+    dup_view_row = MagicMock(schema='sms', viewname='message_status', definition='SELECT 1')
+    mock_conn = _make_conn(
+        ['baseline'],
+        dep_views_by_table={'baseline': [dup_view_row, dup_view_row]},
+    )
+    engine.begin.return_value.__enter__ = MagicMock(return_value=mock_conn)
+    engine.begin.return_value.__exit__ = MagicMock(return_value=False)
+
+    stage = PromoteIbis(config=MagicMock(), engine=engine)
+    result = stage.run()
+
+    assert result.success
+
+    executed_sql = [str(c.args[0]) for c in mock_conn.execute.call_args_list]
+    recreate_count = sum(1 for s in executed_sql if 'CREATE OR REPLACE VIEW sms."message_status"' in s)
+    assert recreate_count == 1

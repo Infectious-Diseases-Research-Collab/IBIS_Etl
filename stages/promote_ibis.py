@@ -73,7 +73,7 @@ class PromoteIbis(BaseStage):
         # Their definitions reference ibis.{table} by name, so after the
         # swap completes they will correctly point to the new table.
         dep_views = conn.execute(text("""
-            SELECT
+            SELECT DISTINCT
                 n.nspname   AS schema,
                 c.relname   AS viewname,
                 pg_get_viewdef(c.oid, true) AS definition
@@ -88,6 +88,18 @@ class PromoteIbis(BaseStage):
               AND tn.nspname = 'ibis'
               AND t.relname  = :table
         """), {"table": table}).fetchall()
+        # A view referencing the promoted table through more than one column
+        # (e.g. joining on one column and selecting another) gets one
+        # pg_depend row per dependent column, not one per view — collapse
+        # to a single recreation per (schema, viewname).
+        seen_views: set[tuple[str, str]] = set()
+        deduped_dep_views = []
+        for view in dep_views:
+            key = (view.schema, view.viewname)
+            if key not in seen_views:
+                seen_views.add(key)
+                deduped_dep_views.append(view)
+        dep_views = deduped_dep_views
 
         conn.execute(text(f'DROP TABLE IF EXISTS ibis."{new_table}"'))
         conn.execute(text(
