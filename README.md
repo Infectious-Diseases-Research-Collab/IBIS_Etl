@@ -21,7 +21,7 @@ SFTP server → Downloads/ → Extracted/  →  bronze_ibis  →  silver_ibis  �
 | 4 | `TransformIbis` | Executes SQL files in `sql/transform/` to build dimension tables in `gold_ibis`. |
 | 5 | `MeasuresIbis` | Runs 24 data-quality checks via `DataValidator`, writes results to `gold_ibis.ds_validation_report`. Executes SQL files in `sql/measures/`. |
 | 6 | `PromoteIbis` | Atomically copies all `gold_ibis` tables to the production `ibis` schema. |
-| 7 | `SendSms` | Syncs `sms.queue` from `ibis.baseline`, then sends due SMS messages to Uganda participants via BLASTA. Failed sends auto-retry up to 2 times across subsequent runs before requiring manual `--resend`. See [SMS.md](SMS.md#retrying-failed-messages). |
+| 7 | `SendSms` | Syncs `sms.queue` from `ibis.baseline`, then sends due SMS messages to Uganda participants via BLASTA. Failed sends auto-retry up to 3 times across subsequent runs before requiring manual `--resend`. See [SMS.md](SMS.md#retrying-failed-messages). |
 | 8 | `StoreIbis` | Appends a dated snapshot of each `ibis` table into `store_ibis` (idempotent — skips if today's snapshot already exists). |
 | — | `ReconcileSilver` | Weekly drift-detection safety net: rebuilds `silver_ibis` from scratch into a throwaway shadow table and diffs it against the live incrementally-maintained table. Never auto-corrects — only reports drift. Deliberately **not** part of `-a`; runs on its own `reconcile_cron` schedule via `python ibis.py -p reconcile_silver`. |
 

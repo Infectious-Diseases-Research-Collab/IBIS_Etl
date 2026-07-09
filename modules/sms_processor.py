@@ -15,7 +15,7 @@ from modules.utils import load_fernet_key
 
 logger = logging.getLogger(__name__)
 
-_MAX_AUTO_RETRIES = 2
+_MAX_AUTO_RETRIES = 3
 
 BLASTA_BASE_URL = "https://sms.dmarkmobile.com/v3/api"
 

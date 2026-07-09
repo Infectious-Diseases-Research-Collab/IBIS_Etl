@@ -9,7 +9,7 @@ Automated SMS sending for Uganda study participants at week-8 and week-11 follow
 1. **Sync queue** — On each run, `ibis.baseline` is scanned for Uganda participants (`countrycode = '1'`) with valid SMS schedule dates. New participants are inserted into `sms.queue`. Already-queued participants are silently skipped.
 2. **Find due messages** — Rows in `sms.queue` with `scheduled_date = CURRENT_DATE`, `status = 'pending'`, `opted_out = FALSE`, and no prior successful send in `sms.log`.
 3. **Resolve template** — Look up `sms.templates` by `(arm, language, week)`. For the Default appointment arm, replace `[...]` in the message with the participant's appointment date.
-4. **Send via BLASTA** — 3 attempts with exponential backoff (1s, 2s, 4s). On success, `sms.queue.status` → `sent`. On permanent failure, the row is auto-retried up to 2 times across subsequent runs (see [Retrying failed messages](#retrying-failed-messages)); after that it's left `failed` for manual review.
+4. **Send via BLASTA** — 3 attempts with exponential backoff (1s, 2s, 4s). On success, `sms.queue.status` → `sent`. On permanent failure, the row is auto-retried up to 3 times across subsequent runs (see [Retrying failed messages](#retrying-failed-messages)); after that it's left `failed` for manual review.
 5. **Log** — Every attempt (success or failure) is written to `sms.log` with the provider message ID, timestamp, and error if any.
 
 ---
@@ -135,7 +135,7 @@ GROUP BY delivery_status;
 
 ## Retrying failed messages
 
-Failed messages retry automatically: each failed send is reset to `pending` so the next scheduled run picks it up again, up to 2 attempts total (tracked by counting `sms.log` failures for that participant/week). Once a message has been auto-retried 2 times without success, it's left `failed` and surfaces in the daily `--check-delivery` flagged-message alert for manual review — that cap resets after a manual `--resend`, so a message you've fixed and resent gets a fresh 2-attempt budget rather than being immediately re-flagged if it fails again.
+Failed messages retry automatically: each failed send is reset to `pending` so the next scheduled run picks it up again, up to 3 attempts total (tracked by counting `sms.log` failures for that participant/week). Once a message has been auto-retried 3 times without success, it's left `failed` and surfaces in the daily `--check-delivery` flagged-message alert for manual review — that cap resets after a manual `--resend`, so a message you've fixed and resent gets a fresh 3-attempt budget rather than being immediately re-flagged if it fails again.
 
 For a message that needs manual attention (e.g., a corrected phone number), use `sms.py --resend` rather than a raw `UPDATE sms.queue` statement — it's audited (who requested it, when, and why is written to `sms.resend_log`), whereas a manual SQL update leaves no record:
 
