@@ -120,6 +120,54 @@ def test_clean_full_history_returns_empty_with_errors_when_all_groups_raise():
     assert failed == {'kenya'}
 
 
+def test_clean_full_history_applies_field_override_for_matching_table():
+    df = pd.DataFrame({
+        'uniqueid': ['a', 'b'],
+        'countrycode': [1, 1],
+        'country': ['uganda', 'uganda'],
+        'extracted_at': pd.to_datetime(['2026-01-01', '2026-01-01']),
+        'consent': ['-9', '1'],
+        'subjid': ['IBIS-1', 'IBIS-2'],
+    })
+    field_overrides = {
+        'baseline': [
+            {'when_col': 'consent', 'when_value': -9, 'set_col': 'subjid', 'set_value': -9},
+        ],
+    }
+    cleaned, errors, failed = clean_full_history(
+        df, dedup_key='uniqueid', country_code_map={'uganda': 1},
+        table_name='baseline', field_overrides=field_overrides,
+    )
+
+    assert errors == []
+    assert failed == set()
+    assert dict(zip(cleaned['uniqueid'], cleaned['subjid'])) == {'a': '-9', 'b': 'IBIS-2'}
+
+
+def test_clean_full_history_skips_field_override_for_other_tables():
+    """A rule scoped to table_name='baseline' must not apply when cleaning
+    e.g. followup, even if followup happens to have matching column names."""
+    df = pd.DataFrame({
+        'uniqueid': ['a'],
+        'countrycode': [1],
+        'country': ['uganda'],
+        'extracted_at': pd.to_datetime(['2026-01-01']),
+        'consent': ['-9'],
+        'subjid': ['IBIS-1'],
+    })
+    field_overrides = {
+        'baseline': [
+            {'when_col': 'consent', 'when_value': -9, 'set_col': 'subjid', 'set_value': -9},
+        ],
+    }
+    cleaned, errors, failed = clean_full_history(
+        df, dedup_key='uniqueid', country_code_map={'uganda': 1},
+        table_name='followup', field_overrides=field_overrides,
+    )
+
+    assert cleaned['subjid'].iloc[0] == 'IBIS-1'
+
+
 def test_clean_full_history_reports_failed_countries_without_dropping_others():
     """A country whose processing raises must: (a) contribute zero rows to
     cleaned_df, (b) appear in failed_countries, and (c) not prevent other

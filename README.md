@@ -221,7 +221,7 @@ The next pipeline run creates (or updates the password of) `ibis_readonly` and g
 | `access_table_name` | Name of the table to export from each MDB file |
 | `excluded_tablets` | List of tablet IDs to skip during ingestion |
 | `db` | PostgreSQL connection details (`host`, `port`, `name`, `user`, `password_secret_file`, optional `readonly_password_secret_file` — see [Read-only reporting access](#read-only-reporting-access)) |
-| `trial` | `dedup_key`, `country_code_map` (country → integer countrycode) |
+| `trial` | `dedup_key`, `country_code_map` (country → integer countrycode), optional `field_overrides` (per-table list of `{when_col, when_value, set_col, set_value}` rules — e.g. force `subjid` to `-9` wherever `consent == -9` — applied automatically during bronze→silver cleaning, `--full-rebuild`, and `reconcile_silver`) |
 | `schedule` | `pipeline_cron`, `store_cron`, `dlr_cron`, `sms_weekly_report_cron`, `incentive_report_cron`, `backup_cron`, `reconcile_cron`, `sla_check_cron` in standard cron format (UTC) |
 | `email` | *(optional)* SMTP settings for pipeline notifications — see below |
 

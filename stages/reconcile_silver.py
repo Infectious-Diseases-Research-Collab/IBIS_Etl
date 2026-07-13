@@ -37,6 +37,7 @@ class ReconcileSilver(BaseStage):
         trial = self.config.get('trial')
         dedup_key = trial['dedup_key']
         country_code_map: dict[str, int] = trial.get('country_code_map', {})
+        field_overrides: dict[str, list[dict]] = trial.get('field_overrides', {})
 
         drifted: list[str] = []
         errors: list[str] = []
@@ -44,7 +45,7 @@ class ReconcileSilver(BaseStage):
         with self.engine.begin() as conn:
             for table_name in _TABLES:
                 try:
-                    if self._check_table(conn, table_name, dedup_key, country_code_map):
+                    if self._check_table(conn, table_name, dedup_key, country_code_map, field_overrides):
                         drifted.append(table_name)
                 except Exception as exc:
                     msg = f"Reconciliation failed for '{table_name}': {exc}"
@@ -60,11 +61,17 @@ class ReconcileSilver(BaseStage):
             metadata={'drifted_tables': drifted},
         )
 
-    def _check_table(self, conn, table_name: str, dedup_key: str, country_code_map: dict) -> bool:
+    def _check_table(
+        self, conn, table_name: str, dedup_key: str, country_code_map: dict,
+        field_overrides: dict[str, list[dict]] | None = None,
+    ) -> bool:
         """Returns True if drift was found for this table."""
         _validate_table_name(table_name)
         bronze_df = pd.read_sql(f'SELECT * FROM bronze_ibis.{table_name}', conn)
-        rebuilt, clean_errors, failed_countries = clean_full_history(bronze_df, dedup_key, country_code_map)
+        rebuilt, clean_errors, failed_countries = clean_full_history(
+            bronze_df, dedup_key, country_code_map,
+            table_name=table_name, field_overrides=field_overrides,
+        )
         if failed_countries:
             # A country that fails during the shadow rebuild will already
             # surface as a row-count/checksum mismatch below, but log it

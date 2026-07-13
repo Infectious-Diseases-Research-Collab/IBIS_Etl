@@ -62,6 +62,40 @@ class DataCleaner:
 
         return pd.concat([deduped, without_uid], ignore_index=True)
 
+    def apply_field_override(
+        self, when_col: str, when_value, set_col: str, set_value,
+    ) -> pd.DataFrame:
+        """
+        Force *set_col* to *set_value* on every row where *when_col* equals
+        *when_value*. Values are compared/written as strings since bronze
+        columns are all text. Config-driven cross-column consistency rules
+        (trial.field_overrides) use this to keep e.g. subjid in sync with
+        consent automatically on every future ingestion.
+
+        No-ops (returns an unmodified copy) if either column is absent —
+        matches filter_by_countrycode's/deduplicate_by_uniqueid's existing
+        "warn and pass through" behavior for a missing column, rather than
+        raising, so one table's rule doesn't break cleaning for a table that
+        doesn't have these columns (e.g. followup).
+        """
+        df = self.df.copy()
+        if when_col not in df.columns or set_col not in df.columns:
+            logger.warning(
+                f"Skipping field override ({set_col} where {when_col}=={when_value}): "
+                f"column not found."
+            )
+            return df
+
+        mask = df[when_col].astype(str).str.strip() == str(when_value)
+        n = int(mask.sum())
+        if n:
+            df.loc[mask, set_col] = str(set_value)
+            logger.info(
+                f"Applied field override: set {set_col}={set_value} where "
+                f"{when_col}=={when_value} ({n} row(s))."
+            )
+        return df
+
     def filter_by_countrycode(self, expected_code: int) -> pd.DataFrame:
         """
         Retain only rows whose *countrycode* matches *expected_code*.

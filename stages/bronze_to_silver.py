@@ -22,6 +22,7 @@ class BronzeToSilver(BaseStage):
         trial = self.config.get('trial')
         dedup_key = trial['dedup_key']
         country_code_map: dict[str, int] = trial.get('country_code_map', {})
+        field_overrides: dict[str, list[dict]] = trial.get('field_overrides', {})
 
         errors: list[str] = []
         total_written = 0
@@ -32,16 +33,21 @@ class BronzeToSilver(BaseStage):
         with self.engine.begin() as conn:
             for table_name in _TABLES:
                 if full_rebuild:
-                    n, errs = self._full_rebuild_table(conn, table_name, dedup_key, country_code_map)
+                    n, errs = self._full_rebuild_table(
+                        conn, table_name, dedup_key, country_code_map, field_overrides
+                    )
                 else:
-                    n, errs = self._process_table(conn, table_name, dedup_key, country_code_map)
+                    n, errs = self._process_table(
+                        conn, table_name, dedup_key, country_code_map, field_overrides
+                    )
                 total_written += n
                 errors.extend(errs)
 
         return StageResult(success=len(errors) == 0, rows_written=total_written, errors=errors)
 
     def _process_table(
-        self, conn, table_name: str, dedup_key: str, country_code_map: dict[str, int]
+        self, conn, table_name: str, dedup_key: str, country_code_map: dict[str, int],
+        field_overrides: dict[str, list[dict]],
     ) -> tuple[int, list[str]]:
         """Clean only newly-ingested bronze_ibis.<table_name> rows (per
         bronze_ibis.meta.promoted_to_silver_at) and fold them into
@@ -63,7 +69,10 @@ class BronzeToSilver(BaseStage):
         )
         logger.info(f"Read {len(bronze_df)} new row(s) from bronze_ibis.{table_name}.")
 
-        cleaned, errors, failed_countries = clean_full_history(bronze_df, dedup_key, country_code_map)
+        cleaned, errors, failed_countries = clean_full_history(
+            bronze_df, dedup_key, country_code_map,
+            table_name=table_name, field_overrides=field_overrides,
+        )
 
         # append_history/ensure_current_table always run, even when `cleaned`
         # is empty: append_history's underlying to_sql(if_exists='append')
@@ -107,7 +116,8 @@ class BronzeToSilver(BaseStage):
         return len(cleaned), errors
 
     def _full_rebuild_table(
-        self, conn, table_name: str, dedup_key: str, country_code_map: dict[str, int]
+        self, conn, table_name: str, dedup_key: str, country_code_map: dict[str, int],
+        field_overrides: dict[str, list[dict]],
     ) -> tuple[int, list[str]]:
         """Recovery path: re-clean ALL of bronze_ibis.<table_name> (ignoring
         promoted_to_silver_at) and replace the CURRENT table's contents.
@@ -117,7 +127,10 @@ class BronzeToSilver(BaseStage):
         if bronze_df.empty:
             return 0, []
 
-        cleaned, errors, failed_countries = clean_full_history(bronze_df, dedup_key, country_code_map)
+        cleaned, errors, failed_countries = clean_full_history(
+            bronze_df, dedup_key, country_code_map,
+            table_name=table_name, field_overrides=field_overrides,
+        )
         if failed_countries:
             # A partial rebuild is worse than no rebuild: if any country's
             # cleaning raised, the resulting `cleaned` frame is missing that

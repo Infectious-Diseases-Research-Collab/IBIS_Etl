@@ -13,6 +13,8 @@ def clean_full_history(
     bronze_df: pd.DataFrame,
     dedup_key: str,
     country_code_map: dict[str, int],
+    table_name: str | None = None,
+    field_overrides: dict[str, list[dict]] | None = None,
 ) -> tuple[pd.DataFrame, list[str], set]:
     """
     Clean and deduplicate a full (or partial) bronze DataFrame using the
@@ -21,6 +23,13 @@ def clean_full_history(
     deduplication on dedup_key. Pure function — no DB I/O — so both the
     normal incremental path (on a new batch) and --full-rebuild /
     reconciliation (on all of bronze) can call it identically.
+
+    field_overrides (from config trial.field_overrides) is a dict of
+    table_name -> list of {when_col, when_value, set_col, set_value} rules,
+    applied via DataCleaner.apply_field_override once per rule, country-
+    independent, after per-country cleaning. Only the rules for *table_name*
+    are applied, so a rule scoped to 'baseline' never touches 'followup'
+    even if column names happen to match.
 
     Returns (cleaned_df, errors, failed_countries). errors are per-country
     failure messages that don't stop other countries from being processed
@@ -79,4 +88,11 @@ def clean_full_history(
         return bronze_df.iloc[0:0], errors, failed_countries
 
     cleaned = pd.concat(all_cleaned, ignore_index=True)
-    return cleaned.drop(columns=['_source_db'], errors='ignore'), errors, failed_countries
+    cleaned = cleaned.drop(columns=['_source_db'], errors='ignore')
+
+    for rule in (field_overrides or {}).get(table_name, []):
+        cleaned = DataCleaner(cleaned).apply_field_override(
+            rule['when_col'], rule['when_value'], rule['set_col'], rule['set_value'],
+        )
+
+    return cleaned, errors, failed_countries

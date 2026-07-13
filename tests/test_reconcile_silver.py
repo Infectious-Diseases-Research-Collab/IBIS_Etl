@@ -5,10 +5,14 @@ from unittest.mock import MagicMock, patch
 from stages.reconcile_silver import ReconcileSilver
 
 
-def _make_config():
+def _make_config(field_overrides=None):
     config = MagicMock()
     config.get.side_effect = lambda key, default=None: {
-        'trial': {'dedup_key': 'uniqueid', 'country_code_map': {'kenya': 2}},
+        'trial': {
+            'dedup_key': 'uniqueid',
+            'country_code_map': {'kenya': 2},
+            'field_overrides': field_overrides or {},
+        },
     }.get(key, default)
     return config
 
@@ -57,6 +61,35 @@ def test_reports_drift_when_row_counts_differ():
 
     assert not result.success
     assert 'baseline' in result.metadata['drifted_tables']
+
+
+def test_field_overrides_from_config_reach_clean_full_history():
+    """The shadow rebuild must apply the same trial.field_overrides rules
+    the live incremental path applies, or reconcile_silver would report
+    false-positive drift once a field-override rule is in effect."""
+    engine = MagicMock()
+    conn = MagicMock()
+    conn.execute.return_value.scalar.side_effect = [2, 2, 'abc', 'abc', 2, 2, 'abc', 'abc']
+    engine.begin.return_value.__enter__ = MagicMock(return_value=conn)
+    engine.begin.return_value.__exit__ = MagicMock(return_value=False)
+
+    bronze_df = pd.DataFrame({
+        'uniqueid': ['a', 'b'], 'countrycode': [2, 2], 'country': ['kenya', 'kenya'],
+        'extracted_at': pd.to_datetime(['2026-01-01', '2026-01-01']),
+    })
+    field_overrides = {
+        'baseline': [{'when_col': 'consent', 'when_value': -9, 'set_col': 'subjid', 'set_value': -9}],
+    }
+
+    with patch('stages.reconcile_silver.pd.read_sql', return_value=bronze_df), \
+         patch('stages.reconcile_silver.clean_full_history',
+               return_value=(bronze_df, [], set())) as mock_clean, \
+         patch.object(pd.DataFrame, 'to_sql'):
+        stage = ReconcileSilver(config=_make_config(field_overrides=field_overrides), engine=engine)
+        stage.run()
+
+    assert mock_clean.call_args_list[0].kwargs.get('table_name') == 'baseline'
+    assert mock_clean.call_args_list[0].kwargs.get('field_overrides') == field_overrides
 
 
 def test_check_table_rejects_invalid_table_name():

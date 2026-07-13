@@ -5,10 +5,14 @@ from unittest.mock import MagicMock, patch
 from stages.bronze_to_silver import BronzeToSilver
 
 
-def _make_config(dedup_key='uniqueid'):
+def _make_config(dedup_key='uniqueid', field_overrides=None):
     config = MagicMock()
     config.get.side_effect = lambda key, default=None: {
-        'trial': {'dedup_key': dedup_key, 'country_code_map': {'kenya': 2, 'uganda': 1}},
+        'trial': {
+            'dedup_key': dedup_key,
+            'country_code_map': {'kenya': 2, 'uganda': 1},
+            'field_overrides': field_overrides or {},
+        },
     }.get(key, default)
     return config
 
@@ -148,6 +152,40 @@ def test_processes_both_baseline_and_followup_in_one_transaction():
     assert result.success
     assert result.rows_written == 2  # one row promoted for baseline, one for followup
     engine.begin.assert_called_once()
+
+
+def test_field_overrides_from_config_reach_clean_full_history():
+    """trial.field_overrides must be threaded from config into every
+    clean_full_history call, scoped per table_name, so a rule like
+    'consent==-9 => subjid=-9' applies automatically to every future batch
+    without a separate code change per rule."""
+    engine = MagicMock()
+    conn = _make_conn_with_meta(['run-1'])
+    engine.begin.return_value.__enter__ = MagicMock(return_value=conn)
+    engine.begin.return_value.__exit__ = MagicMock(return_value=False)
+
+    bronze_df = pd.DataFrame({
+        'uniqueid': ['a'], 'countrycode': [1], 'country': ['uganda'],
+        'extracted_at': pd.to_datetime(['2026-01-01']), 'run_uuid': ['run-1'],
+    })
+    field_overrides = {
+        'baseline': [{'when_col': 'consent', 'when_value': -9, 'set_col': 'subjid', 'set_value': -9}],
+    }
+
+    with patch('stages.bronze_to_silver.pd.read_sql', return_value=bronze_df), \
+         patch('stages.bronze_to_silver.clean_full_history',
+               return_value=(bronze_df, [], set())) as mock_clean, \
+         patch('stages.bronze_to_silver.append_history'), \
+         patch('stages.bronze_to_silver.ensure_current_table'), \
+         patch('stages.bronze_to_silver.upsert_latest'):
+        stage = BronzeToSilver(config=_make_config(field_overrides=field_overrides), engine=engine)
+        stage.run()
+
+    baseline_calls = [c for c in mock_clean.call_args_list if c.args[0] is bronze_df]
+    assert baseline_calls
+    for call in baseline_calls:
+        assert call.kwargs.get('field_overrides') == field_overrides
+        assert call.kwargs.get('table_name') in ('baseline', 'followup')
 
 
 def test_full_rebuild_bypasses_meta_filter_and_rewrites_current_table():

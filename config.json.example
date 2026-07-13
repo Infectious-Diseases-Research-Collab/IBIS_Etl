@@ -35,6 +35,11 @@
     "country_code_map": {
       "country1": 1,
       "country2": 2
+    },
+    "field_overrides": {
+      "baseline": [
+        {"when_col": "consent", "when_value": -9, "set_col": "subjid", "set_value": -9}
+      ]
     }
   },
   "schedule": {

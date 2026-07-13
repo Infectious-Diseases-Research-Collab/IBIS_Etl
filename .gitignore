@@ -29,6 +29,9 @@ data/
 # Sensitive export scripts
 scripts/export_ug_incentive_arm.py
 scripts/export_ug_occupation_97.py
+scripts/export_ug_dflt_appt_sameday.py
+scripts/export_ug_enrolment.py
+scripts/send_dflt_appt_sameday_email.py
 
 # Logs
 *.log
