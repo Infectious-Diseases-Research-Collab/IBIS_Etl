@@ -87,7 +87,13 @@ def test_sms_scheduled_invocations_are_tracked():
     )
     weekly_report_args = Namespace(
         init_db=False, resend=False, check_delivery=False, weekly_report=True, sync=False,
+        week_to_date=False,
+    )
+    weekly_report_wtd_args = Namespace(
+        init_db=False, resend=False, check_delivery=False, weekly_report=True, sync=False,
+        week_to_date=True,
     )
 
     assert sms_compute_invocation(check_delivery_args) in _TRACKED_INVOCATIONS
     assert sms_compute_invocation(weekly_report_args) in _TRACKED_INVOCATIONS
+    assert sms_compute_invocation(weekly_report_wtd_args) in _TRACKED_INVOCATIONS

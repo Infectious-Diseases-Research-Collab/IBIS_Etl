@@ -494,10 +494,10 @@ def _build_weekly_sms_df(rows: list[dict], period_label: str) -> pd.DataFrame:
     return pd.DataFrame(records, columns=cols)
 
 
-def _build_weekly_sms_report(weekly_rows: list[dict], cumulative_rows: list[dict], week_ending: str) -> str:
+def _build_weekly_sms_report(weekly_rows: list[dict], cumulative_rows: list[dict], period_label: str) -> str:
     """Build full weekly SMS report: this-week table + cumulative table."""
     parts = [
-        f'IBIS SMS Weekly Report — week ending {week_ending}',
+        f'IBIS SMS Weekly Report — {period_label}',
         '',
         _build_weekly_sms_table(weekly_rows, 'This week'),
         '',
@@ -682,25 +682,40 @@ def _build_followup_table(rows: list[dict]) -> str:
     return '\n'.join(lines)
 
 
-def send_sms_weekly_report(engine, config) -> None:
-    """Send weekly SMS activity report to Uganda field recipients."""
+def send_sms_weekly_report(engine, config, partial: bool = False) -> None:
+    """Send weekly SMS activity report.
+
+    partial=False (default, Wednesday cron): reports the just-completed
+    Wed–Tue week, sent to sms_dm_recipients.
+    partial=True (Monday cron): reports the in-progress week so far (this
+    week's Wednesday through today), sent to sms_weekly_report_monday_recipients.
+    """
     from datetime import date, timedelta
     email_cfg = config.get('email')
     if not email_cfg:
         return
 
-    uganda_recipients = email_cfg.get('sms_dm_recipients', [])
+    recipients_key = 'sms_weekly_report_monday_recipients' if partial else 'sms_dm_recipients'
+    uganda_recipients = email_cfg.get(recipients_key, [])
     if not uganda_recipients:
-        logger.warning("No sms_dm_recipients configured — weekly SMS report not sent.")
+        logger.warning("No %s configured — weekly SMS report not sent.", recipients_key)
         return
 
-    # Wednesday-to-Tuesday window: last Wednesday 00:00 to end of this Tuesday.
-    # Report is sent Wednesday morning covering the previous Wed–Tue period.
     today = date.today()
-    days_since_tuesday = (today.weekday() - 1) % 7
-    this_tuesday = today - timedelta(days=days_since_tuesday)
-    week_start = this_tuesday - timedelta(days=6)   # previous Wednesday
-    week_end = this_tuesday + timedelta(days=1)     # exclusive upper bound — includes all of Tuesday
+    if partial:
+        # Week-to-date: this week's Wednesday through today (inclusive).
+        days_since_wednesday = (today.weekday() - 2) % 7
+        week_start = today - timedelta(days=days_since_wednesday)
+        week_end = today + timedelta(days=1)   # exclusive upper bound — includes all of today
+        period_label = f'week-to-date as of {today.strftime("%d %b %Y")}'
+    else:
+        # Wednesday-to-Tuesday window: last Wednesday 00:00 to end of this Tuesday.
+        # Report is sent Wednesday morning covering the previous Wed–Tue period.
+        days_since_tuesday = (today.weekday() - 1) % 7
+        this_tuesday = today - timedelta(days=days_since_tuesday)
+        week_start = this_tuesday - timedelta(days=6)   # previous Wednesday
+        week_end = this_tuesday + timedelta(days=1)     # exclusive upper bound — includes all of Tuesday
+        period_label = f'week ending {this_tuesday.strftime("%d %b %Y")}'
 
     from modules.sms_processor import SmsProcessor
     processor = SmsProcessor(config=config, engine=engine)
@@ -713,17 +728,17 @@ def send_sms_weekly_report(engine, config) -> None:
         logger.info("No SMS activity or follow-up data — weekly report not sent.")
         return
 
-    week_ending_str = this_tuesday.strftime('%d %b %Y')
-    subject = f'IBIS SMS Weekly Report \u2014 week ending {week_ending_str}'
-    plain = _build_weekly_sms_report(weekly_rows, cumulative_rows, week_ending_str)
+    subject = f'IBIS SMS Weekly Report \u2014 {period_label}'
+    plain = _build_weekly_sms_report(weekly_rows, cumulative_rows, period_label)
     plain = f'{plain}\n\n{_build_followup_table(followup_rows)}'
     html = f'<pre style="font-family:monospace;font-size:13px">{_html.escape(plain)}</pre>'
 
     # Build CSV attachment in the formatted report layout,
     # with a blank spacer row separating the sections.
+    this_week_section_label = 'Week to date' if partial else 'This week'
     frames = []
     if weekly_rows:
-        frames.append(_build_weekly_sms_df(weekly_rows, f'This week (ending {week_ending_str})'))
+        frames.append(_build_weekly_sms_df(weekly_rows, f'{this_week_section_label} ({period_label})'))
     if weekly_rows and cumulative_rows:
         frames.append(pd.DataFrame([{}]))
     if cumulative_rows:
@@ -734,7 +749,7 @@ def send_sms_weekly_report(engine, config) -> None:
         frames.append(_build_followup_df(followup_rows))
     attachment_df = pd.concat(frames, ignore_index=True) if frames else None
 
-    csv_filename = f'ibis_sms_report_{this_tuesday.strftime("%Y-%m-%d")}.csv'
+    csv_filename = f'ibis_sms_report_{today.strftime("%Y-%m-%d")}.csv'
 
     # Build delivery linelist — all messages sent to date, one row per message.
     linelist_rows = processor.get_delivery_linelist()
@@ -742,7 +757,7 @@ def send_sms_weekly_report(engine, config) -> None:
     if linelist_df is not None:
         linelist_df.columns = ['Subject ID', 'Site', 'Week', 'Arm', 'Language',
                                'Mobile', 'Scheduled Date', 'Sent At (EAT)', 'Delivery Status']
-    linelist_filename = f'ibis_sms_linelist_{this_tuesday.strftime("%Y-%m-%d")}.csv'
+    linelist_filename = f'ibis_sms_linelist_{today.strftime("%Y-%m-%d")}.csv'
 
     extra = [(linelist_df, linelist_filename)] if linelist_df is not None else []
     try:

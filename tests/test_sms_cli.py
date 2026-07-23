@@ -12,7 +12,7 @@ from stages.base import StageResult
 
 def _args(**overrides):
     defaults = dict(
-        sync=False, dry_run=False, weekly_report=False, init_db=False,
+        sync=False, dry_run=False, weekly_report=False, week_to_date=False, init_db=False,
         check_delivery=False, resend=False, subjid=None, week=None,
         actor=None, note=None, verbose=False,
     )
@@ -115,7 +115,7 @@ def test_weekly_report_records_invocation_with_flag_suffix(monkeypatch):
     monkeypatch.setattr(sms, 'finish_pipeline_run', lambda *a, **kw: None)
     monkeypatch.setattr(sms, 'init_schemas', lambda engine: None)
     monkeypatch.setattr(sms, 'run_migrations', lambda engine: None)
-    monkeypatch.setattr(sms, 'send_sms_weekly_report', lambda engine, config: None)
+    monkeypatch.setattr(sms, 'send_sms_weekly_report', lambda engine, config, partial=False: None)
 
     config = MagicMock()
     engine = MagicMock()
@@ -123,6 +123,25 @@ def test_weekly_report_records_invocation_with_flag_suffix(monkeypatch):
     _run(_args(weekly_report=True), config, engine)
 
     assert calls['start'] == ['sms --weekly-report']
+
+
+def test_weekly_report_week_to_date_records_invocation_with_flag_suffix(monkeypatch):
+    """--weekly-report --week-to-date must record a distinct invocation
+    string so it's tracked separately in _TRACKED_INVOCATIONS."""
+    calls = {'start': []}
+    monkeypatch.setattr(sms, 'start_pipeline_run', lambda engine, invocation: (calls['start'].append(invocation), 1)[1])
+    monkeypatch.setattr(sms, 'record_stage_run', lambda *a, **kw: None)
+    monkeypatch.setattr(sms, 'finish_pipeline_run', lambda *a, **kw: None)
+    monkeypatch.setattr(sms, 'init_schemas', lambda engine: None)
+    monkeypatch.setattr(sms, 'run_migrations', lambda engine: None)
+    monkeypatch.setattr(sms, 'send_sms_weekly_report', lambda engine, config, partial=False: None)
+
+    config = MagicMock()
+    engine = MagicMock()
+
+    _run(_args(weekly_report=True, week_to_date=True), config, engine)
+
+    assert calls['start'] == ['sms --weekly-report --week-to-date']
 
 
 def test_run_records_metrics_around_default_send(monkeypatch):
@@ -272,7 +291,7 @@ def test_weekly_report_failure_is_recorded_as_failed_not_success(monkeypatch):
     monkeypatch.setattr(sms, 'init_schemas', lambda engine: None)
     monkeypatch.setattr(sms, 'run_migrations', lambda engine: None)
 
-    def boom(engine, config):
+    def boom(engine, config, partial=False):
         raise RuntimeError('conn refused')
 
     monkeypatch.setattr(sms, 'send_sms_weekly_report', boom)

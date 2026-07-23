@@ -46,7 +46,7 @@ def _compute_invocation(args) -> str:
     if args.check_delivery:
         return 'sms --check-delivery'
     if args.weekly_report:
-        return 'sms --weekly-report'
+        return 'sms --weekly-report --week-to-date' if getattr(args, 'week_to_date', False) else 'sms --weekly-report'
     if args.sync:
         return 'sms --sync'
     return 'sms'
@@ -57,6 +57,11 @@ def main() -> None:
     parser.add_argument('--sync',            action='store_true', help='Sync queue only, no sending')
     parser.add_argument('--dry-run',         action='store_true', help='Log what would be sent, no actual send')
     parser.add_argument('--weekly-report',   action='store_true', help='Send weekly facility report email')
+    parser.add_argument('--week-to-date', action='store_true',
+                        help='Used with --weekly-report: report the in-progress week so far '
+                             '(this week\'s Wednesday through today) instead of the last '
+                             'completed week, and send to sms_weekly_report_monday_recipients '
+                             'instead of sms_dm_recipients')
     parser.add_argument('--init-db',         action='store_true', help='Create SMS tables (run once at setup)')
     parser.add_argument('--check-delivery',  action='store_true',
                         help='Poll Blasta DLR for all unconfirmed sent messages')
@@ -167,7 +172,7 @@ def _run(args, config, engine) -> None:
 
         if args.weekly_report:
             stage_name = 'sms_weekly_report'
-            send_sms_weekly_report(engine, config)
+            send_sms_weekly_report(engine, config, partial=args.week_to_date)
             return
 
         stage_name = 'sms_send'

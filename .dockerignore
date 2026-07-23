@@ -1,6 +1,7 @@
 keyFiles/
 Downloads/
 Extracted/
+backups/
 *.key
 *.ini
 __pycache__/

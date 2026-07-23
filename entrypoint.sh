@@ -54,6 +54,19 @@ except Exception as e:
     sys.exit(1)
 ")
 
+SMS_WEEKLY_REPORT_MONDAY_CRON=$(python3 -c "
+import json, sys
+try:
+    c = json.load(open('/app/config.json'))
+    val = c['schedule']['sms_weekly_report_monday_cron']
+    if not val or not val.strip():
+        raise ValueError('sms_weekly_report_monday_cron is empty')
+    print(val.strip())
+except Exception as e:
+    print('ERROR: ' + str(e), file=sys.stderr)
+    sys.exit(1)
+")
+
 INCENTIVE_REPORT_CRON=$(python3 -c "
 import json, sys
 try:
@@ -123,6 +136,10 @@ if [ -z "$SMS_WEEKLY_REPORT_CRON" ]; then
     echo "FATAL: SMS_WEEKLY_REPORT_CRON is empty — check config.json schedule.sms_weekly_report_cron" >&2
     exit 1
 fi
+if [ -z "$SMS_WEEKLY_REPORT_MONDAY_CRON" ]; then
+    echo "FATAL: SMS_WEEKLY_REPORT_MONDAY_CRON is empty — check config.json schedule.sms_weekly_report_monday_cron" >&2
+    exit 1
+fi
 if [ -z "$INCENTIVE_REPORT_CRON" ]; then
     echo "FATAL: INCENTIVE_REPORT_CRON is empty — check config.json schedule.incentive_report_cron" >&2
     exit 1
@@ -146,6 +163,7 @@ ${PIPELINE_CRON} root cd /app && python ibis.py -a >> /var/log/ibis/pipeline.log
 ${STORE_CRON} root cd /app && python ibis.py -p store_ibis >> /var/log/ibis/store.log 2>&1
 ${DLR_CRON} root cd /app && python sms.py --check-delivery >> /var/log/ibis/dlr.log 2>&1
 ${SMS_WEEKLY_REPORT_CRON} root cd /app && python sms.py --weekly-report >> /var/log/ibis/sms_report.log 2>&1
+${SMS_WEEKLY_REPORT_MONDAY_CRON} root cd /app && python sms.py --weekly-report --week-to-date >> /var/log/ibis/sms_report_monday.log 2>&1
 ${INCENTIVE_REPORT_CRON} root cd /app && python scripts/export_ug_incentive_arm.py >> /var/log/ibis/incentive_report.log 2>&1
 ${BACKUP_CRON} root bash /app/scripts/backup_db.sh >> /var/log/ibis/backup.log 2>&1
 ${RECONCILE_CRON} root cd /app && python ibis.py -p reconcile_silver >> /var/log/ibis/reconcile.log 2>&1
@@ -155,6 +173,6 @@ EOF
 
 chmod 0644 /etc/cron.d/ibis
 mkdir -p /var/log/ibis
-touch /var/log/ibis/pipeline.log /var/log/ibis/store.log /var/log/ibis/dlr.log /var/log/ibis/sms_report.log /var/log/ibis/backup.log /var/log/ibis/reconcile.log /var/log/ibis/sla_check.log
+touch /var/log/ibis/pipeline.log /var/log/ibis/store.log /var/log/ibis/dlr.log /var/log/ibis/sms_report.log /var/log/ibis/sms_report_monday.log /var/log/ibis/backup.log /var/log/ibis/reconcile.log /var/log/ibis/sla_check.log
 
 exec "$@"

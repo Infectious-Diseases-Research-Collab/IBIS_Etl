@@ -39,6 +39,7 @@ _TRACKED_INVOCATIONS: dict[str, timedelta] = {
     '-p store_ibis': timedelta(days=8.5),
     'sms --check-delivery': timedelta(hours=26),
     'sms --weekly-report': timedelta(days=8.5),
+    'sms --weekly-report --week-to-date': timedelta(days=8.5),
     '-p reconcile_silver': timedelta(days=8.5),
 }
 
