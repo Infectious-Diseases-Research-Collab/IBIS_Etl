@@ -31,6 +31,9 @@ Validation checks performed
 22. Health facility code validity (codes must match the country's valid set).
 23. Tablet record counts (tablets with suspiciously few records).
 24. Overall record completeness (columns with high null rates).
+25. Records missing from a tablet's recent syncs (possibly deleted in the
+    field) — requires a precomputed stale_uniqueids set, see
+    modules.stale_records.find_stale_uniqueids and validate_stale_records().
 
 Usage
 ~~~~~
@@ -85,6 +88,7 @@ class _CheckSpec:
     needs_country_code: bool = False  # call as method(df, country_code, country_name); skipped if country_code is None
     needs_country_name: bool = False  # call as method(df, country_name)
     identity: bool = False            # skipped when skip_identity=True
+    needs_stale_uniqueids: bool = False  # call as method(df, stale_uniqueids); skipped if stale_uniqueids is falsy
 
 
 class DataValidator:
@@ -153,6 +157,8 @@ class DataValidator:
         _CheckSpec('_check_screening_id_format', needs_country_name=True),
         _CheckSpec('_check_tablet_record_counts'),
         _CheckSpec('_check_record_completeness'),
+        # Cross-sync integrity checks — require data external to df itself
+        _CheckSpec('_check_stale_record', needs_stale_uniqueids=True),
     )
 
     # Check names produced exclusively by the identity=True checks above —
@@ -178,9 +184,10 @@ class DataValidator:
         country_name: str = '',
         site_name: str = '',
         skip_identity: bool = False,
+        stale_uniqueids: Optional[set[str]] = None,
     ) -> pd.DataFrame:
         """
-        Run all 24 validation checks and return a quality-report DataFrame.
+        Run all 25 validation checks and return a quality-report DataFrame.
 
         Each row in the report represents one issue found.  Columns:
             check            - name of the validation check
@@ -193,6 +200,12 @@ class DataValidator:
             affected_subjids - semicolon-separated subjids (or screening_ids) of
                                the specific records involved, where applicable
             affected_tablets - comma-separated tablet numbers of the affected rows
+
+        stale_uniqueids: precomputed by modules.stale_records.find_stale_uniqueids
+            and passed in by measures_ibis.py. Records in df whose uniqueid is in
+            this set are flagged by _check_stale_record. The check is skipped
+            entirely when this is None or empty — same gating pattern as
+            country_code=None skipping the countrycode_mismatch check.
         """
         issues: list[dict] = []
 
@@ -201,15 +214,42 @@ class DataValidator:
                 continue
             if spec.needs_country_code and country_code is None:
                 continue
+            if spec.needs_stale_uniqueids and not stale_uniqueids:
+                continue
 
             method = getattr(self, spec.method_name)
             if spec.needs_country_code:
                 issues += method(df, country_code, country_name)
             elif spec.needs_country_name:
                 issues += method(df, country_name)
+            elif spec.needs_stale_uniqueids:
+                issues += method(df, stale_uniqueids)
             else:
                 issues += method(df)
 
+        return self._finalize_report(issues, country_name, site_name)
+
+    def validate_stale_records(
+        self,
+        df: pd.DataFrame,
+        stale_uniqueids: set[str],
+        country_name: str = '',
+        site_name: str = '',
+    ) -> pd.DataFrame:
+        """
+        Run only _check_stale_record, bypassing the rest of the suite.
+
+        Used for tables (currently: followup) that don't go through the
+        full validate() suite at all — see modules/data_validator.py's
+        _check_stale_record and docs/superpowers/specs/
+        2026-07-27-stale-record-validator-check-design.md.
+        """
+        issues = self._check_stale_record(df, stale_uniqueids) if stale_uniqueids else []
+        return self._finalize_report(issues, country_name, site_name)
+
+    def _finalize_report(
+        self, issues: list[dict], country_name: str, site_name: str
+    ) -> pd.DataFrame:
         for issue in issues:
             issue.setdefault('country', country_name)
             issue.setdefault('site', site_name)
@@ -1541,3 +1581,38 @@ class DataValidator:
                     affected_subjids='',
                 ))
         return issues
+
+    # ------------------------------------------------------------------
+    # Cross-sync integrity checks (25)
+    # ------------------------------------------------------------------
+
+    def _check_stale_record(
+        self, df: pd.DataFrame, stale_uniqueids: set[str]
+    ) -> list[dict]:
+        """
+        Flag records whose uniqueid was found (by modules.stale_records) to
+        be missing from their tablet's most recent successful syncs — likely
+        deleted in the field. bronze_ibis's append-only ingestion and
+        silver_ibis's upsert-by-uniqueid never remove a row on their own just
+        because it stops appearing in new syncs, so this is advisory only:
+        it surfaces candidates for human review, it does not delete anything.
+        """
+        if 'uniqueid' not in df.columns or not stale_uniqueids:
+            return []
+        mask = df['uniqueid'].isin(stale_uniqueids)
+        n = int(mask.sum())
+        if not n:
+            return []
+        return [dict(
+            check='stale_record_missing_from_tablet',
+            severity='WARNING',
+            field='uniqueid',
+            record_count=n,
+            detail=(
+                f"{n} record(s) are present in silver_ibis but missing from "
+                f"their tablet's last 2 successful syncs — may have been "
+                f"deleted in the field. Review before removing from silver_ibis."
+            ),
+            affected_subjids=self._subjids_for_mask(df, mask),
+            affected_tablets=self._tablets_for_mask(df, mask),
+        )]
