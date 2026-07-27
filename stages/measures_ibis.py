@@ -184,7 +184,14 @@ class MeasuresIbis(BaseStage):
         docs/superpowers/specs/2026-07-27-stale-record-validator-check-design.md).
         Appends any issues found directly to *all_reports*.
         """
-        followup_df = pd.read_sql('SELECT * FROM silver_ibis.followup', self.engine)
+        try:
+            followup_df = pd.read_sql('SELECT * FROM silver_ibis.followup', self.engine)
+        except Exception as exc:
+            msg = f"Could not read silver_ibis.followup: {exc}"
+            logger.error(msg)
+            errors.append(msg)
+            return
+
         if followup_df.empty:
             logger.info("silver_ibis.followup is empty — skipping followup stale-record check.")
             return
