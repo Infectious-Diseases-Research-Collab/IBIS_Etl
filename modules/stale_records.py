@@ -24,8 +24,26 @@ def _tablet_number(file_path: str) -> str | None:
     e.g. 'Extracted/Uganda/Tablet53_2026_07_24-16_25_25/IBIS_pilot.mdb' -> '53'.
     Mirrors the Tablet\\d+ pattern already used in modules/access_reader.py.
     """
-    m = _TABLET_RE.search(file_path)
+    if file_path is None or (isinstance(file_path, float) and pd.isna(file_path)):
+        return None
+    m = _TABLET_RE.search(str(file_path))
     return m.group(1) if m else None
+
+
+def _normalize_tablet(value) -> str:
+    """
+    Strip the spurious '.0' pandas adds when tabletnum round-trips through a
+    float64 column — same issue modules/data_validator.py's
+    _strip_float_suffix works around for the same column.
+    """
+    s = str(value).strip()
+    try:
+        f = float(s)
+        if f == int(f):
+            return str(int(f))
+    except (ValueError, OverflowError):
+        pass
+    return s
 
 
 def find_stale_uniqueids(engine, table_name: str, min_absent_syncs: int = 2) -> set[str]:
@@ -43,9 +61,9 @@ def find_stale_uniqueids(engine, table_name: str, min_absent_syncs: int = 2) -> 
     Never raises: any failure degrades to "nothing flagged this run"
     (returns an empty set) rather than failing the calling pipeline stage.
     """
-    table_name = _validate_table_name(table_name)
-
     try:
+        table_name = _validate_table_name(table_name)
+
         with engine.connect() as conn:
             meta = pd.read_sql(
                 text(
@@ -55,31 +73,25 @@ def find_stale_uniqueids(engine, table_name: str, min_absent_syncs: int = 2) -> 
                 ),
                 conn, params={'tn': table_name},
             )
-    except Exception as exc:
-        logger.warning(
-            f"find_stale_uniqueids({table_name}): could not read bronze_ibis.meta: {exc}"
-        )
-        return set()
 
-    if meta.empty:
-        return set()
+        if meta.empty:
+            return set()
 
-    meta['tablet'] = meta['file_path'].map(_tablet_number)
-    meta = meta.dropna(subset=['tablet'])
+        meta['tablet'] = meta['file_path'].map(_tablet_number)
+        meta = meta.dropna(subset=['tablet'])
 
-    recent_run_uuids: list[str] = []
-    tablets_with_history: set[str] = set()
-    for tablet, group in meta.groupby('tablet'):
-        top = group.sort_values('last_modified', ascending=False).head(min_absent_syncs)
-        if len(top) < min_absent_syncs:
-            continue  # not enough sync history for this tablet yet
-        tablets_with_history.add(tablet)
-        recent_run_uuids.extend(top['run_uuid'].tolist())
+        recent_run_uuids: list[str] = []
+        tablets_with_history: set[str] = set()
+        for tablet, group in meta.groupby('tablet'):
+            top = group.sort_values('last_modified', ascending=False).head(min_absent_syncs)
+            if len(top) < min_absent_syncs:
+                continue  # not enough sync history for this tablet yet
+            tablets_with_history.add(tablet)
+            recent_run_uuids.extend(top['run_uuid'].tolist())
 
-    if not tablets_with_history:
-        return set()
+        if not tablets_with_history:
+            return set()
 
-    try:
         with engine.connect() as conn:
             recent_present = pd.read_sql(
                 text(
@@ -92,17 +104,17 @@ def find_stale_uniqueids(engine, table_name: str, min_absent_syncs: int = 2) -> 
                 text(f"SELECT uniqueid, tabletnum FROM silver_ibis.{table_name}"),
                 conn,
             )
+
+        present_ids = set(recent_present['uniqueid'].dropna().astype(str))
+        silver = silver[silver['tabletnum'].map(_normalize_tablet).isin(tablets_with_history)]
+        silver_ids = set(silver['uniqueid'].dropna().astype(str))
+
+        stale = silver_ids - present_ids
+        if stale:
+            logger.info(
+                f"find_stale_uniqueids({table_name}): {len(stale)} stale uniqueid(s) found."
+            )
+        return stale
     except Exception as exc:
-        logger.warning(
-            f"find_stale_uniqueids({table_name}): could not read bronze/silver data: {exc}"
-        )
+        logger.warning(f"find_stale_uniqueids({table_name}): failed, returning empty set: {exc}")
         return set()
-
-    present_ids = set(recent_present['uniqueid'].dropna().astype(str))
-    silver = silver[silver['tabletnum'].astype(str).isin(tablets_with_history)]
-    silver_ids = set(silver['uniqueid'].dropna().astype(str))
-
-    stale = silver_ids - present_ids
-    if stale:
-        logger.info(f"find_stale_uniqueids({table_name}): {len(stale)} stale uniqueid(s) found.")
-    return stale

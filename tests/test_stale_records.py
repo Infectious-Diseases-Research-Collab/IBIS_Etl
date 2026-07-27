@@ -145,6 +145,37 @@ class TestFindStaleUniqueids(unittest.TestCase):
 
         self.assertEqual(stale, set())
 
+    def test_returns_empty_set_on_invalid_table_name(self):
+        engine = _mock_engine()
+        stale = find_stale_uniqueids(engine, 'baseline; DROP TABLE users')
+        self.assertEqual(stale, set())
+
+    def test_normalizes_float_suffix_tabletnum_before_matching(self):
+        meta_df = pd.DataFrame({
+            'file_path': [
+                'Extracted/Uganda/Tablet53_2026_07_24-16_25_25/IBIS_pilot.mdb',
+                'Extracted/Uganda/Tablet53_2026_07_15-16_41_47/IBIS_pilot.mdb',
+            ],
+            'run_uuid': ['run_latest', 'run_prev'],
+            'last_modified': pd.to_datetime(['2026-07-24', '2026-07-15']),
+        })
+        present_df = pd.DataFrame({'uniqueid': ['still_here']})
+        # tabletnum has the float-suffix artifact pandas adds when a column
+        # round-trips through float64 — must still match tablet '53'.
+        silver_df = pd.DataFrame({
+            'uniqueid': ['still_here', 'deleted_one'],
+            'tabletnum': ['53.0', '53.0'],
+        })
+
+        engine = _mock_engine()
+        with patch(
+            'modules.stale_records.pd.read_sql',
+            side_effect=_fake_read_sql(meta_df, present_df, silver_df),
+        ):
+            stale = find_stale_uniqueids(engine, 'baseline')
+
+        self.assertEqual(stale, {'deleted_one'})
+
 
 if __name__ == '__main__':
     unittest.main()
