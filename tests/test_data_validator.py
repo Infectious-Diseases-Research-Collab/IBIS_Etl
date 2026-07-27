@@ -246,6 +246,46 @@ class TestSimilarNames(unittest.TestCase):
         self.assertEqual(self.v._check_similar_names(df), [])
 
 
+class TestStaleRecord(unittest.TestCase):
+    def setUp(self):
+        self.v = _validator()
+
+    def test_flags_uniqueid_in_stale_set(self):
+        df = pd.DataFrame({'uniqueid': ['a', 'b'], 'tabletnum': ['53', '53']})
+        issues = self.v._check_stale_record(df, {'a'})
+        self.assertEqual(len(issues), 1)
+        self.assertEqual(issues[0]['check'], 'stale_record_missing_from_tablet')
+        self.assertEqual(issues[0]['severity'], 'WARNING')
+        self.assertEqual(issues[0]['record_count'], 1)
+
+    def test_no_issue_when_stale_set_empty(self):
+        df = pd.DataFrame({'uniqueid': ['a', 'b']})
+        self.assertEqual(self.v._check_stale_record(df, set()), [])
+
+    def test_no_issue_when_no_match(self):
+        df = pd.DataFrame({'uniqueid': ['a', 'b']})
+        self.assertEqual(self.v._check_stale_record(df, {'z'}), [])
+
+    def test_skips_when_column_absent(self):
+        df = pd.DataFrame({'other': [1, 2]})
+        self.assertEqual(self.v._check_stale_record(df, {'a'}), [])
+
+    def test_validate_stale_records_returns_full_report_shape(self):
+        df = pd.DataFrame({'uniqueid': ['a'], 'tabletnum': ['53']})
+        report = self.v.validate_stale_records(
+            df, {'a'}, country_name='uganda', site_name='Bushenyi'
+        )
+        self.assertEqual(len(report), 1)
+        self.assertEqual(report.iloc[0]['check'], 'stale_record_missing_from_tablet')
+        self.assertEqual(report.iloc[0]['country'], 'uganda')
+        self.assertEqual(report.iloc[0]['site'], 'Bushenyi')
+
+    def test_validate_stale_records_empty_set_returns_empty_report(self):
+        df = pd.DataFrame({'uniqueid': ['a']})
+        report = self.v.validate_stale_records(df, set())
+        self.assertTrue(report.empty)
+
+
 class TestValidateRegistry(unittest.TestCase):
     """
     Covers validate() itself — the registry-driven orchestration added when
@@ -268,8 +308,18 @@ class TestValidateRegistry(unittest.TestCase):
         base.update(overrides)
         return pd.DataFrame(base)
 
-    def test_runs_all_24_registered_checks(self):
-        self.assertEqual(len(DataValidator._CHECKS), 24)
+    def test_runs_all_25_registered_checks(self):
+        self.assertEqual(len(DataValidator._CHECKS), 25)
+
+    def test_stale_uniqueids_none_skips_stale_record_check(self):
+        df = self._df(uniqueid=['U1', 'U2'])
+        report = self.v.validate(df, stale_uniqueids=None)
+        self.assertTrue(report[report['check'] == 'stale_record_missing_from_tablet'].empty)
+
+    def test_stale_uniqueids_given_runs_stale_record_check(self):
+        df = self._df(uniqueid=['U1', 'U2'])
+        report = self.v.validate(df, stale_uniqueids={'U1'})
+        self.assertFalse(report[report['check'] == 'stale_record_missing_from_tablet'].empty)
 
     def test_skip_identity_true_excludes_identity_checks(self):
         report = self.v.validate(self._df(), skip_identity=True)
