@@ -31,6 +31,9 @@ Validation checks performed
 22. Health facility code validity (codes must match the country's valid set).
 23. Tablet record counts (tablets with suspiciously few records).
 24. Overall record completeness (columns with high null rates).
+25. Records missing from a tablet's recent syncs (possibly deleted in the
+    field) — requires a precomputed stale_uniqueids set, see
+    modules.stale_records.find_stale_uniqueids and validate_stale_records().
 
 Usage
 ~~~~~

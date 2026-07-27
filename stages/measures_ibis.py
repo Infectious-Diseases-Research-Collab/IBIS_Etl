@@ -182,38 +182,41 @@ class MeasuresIbis(BaseStage):
         Run only the stale-record check against silver_ibis.followup —
         followup does not go through the full DataValidator suite (see
         docs/superpowers/specs/2026-07-27-stale-record-validator-check-design.md).
-        Appends any issues found directly to *all_reports*.
+        Appends any issues found directly to *all_reports*. The whole method
+        body is wrapped in one outer try/except (in addition to the more
+        specific per-site guard below) so any followup-specific failure —
+        the read, the groupby, or an unexpected schema — can never escape
+        and prevent run() from writing the baseline report it already
+        computed before calling this method.
         """
         try:
             followup_df = pd.read_sql('SELECT * FROM silver_ibis.followup', self.engine)
+            if followup_df.empty:
+                logger.info("silver_ibis.followup is empty — skipping followup stale-record check.")
+                return
+
+            stale_followup = find_stale_uniqueids(self.engine, 'followup')
+            if not stale_followup:
+                return
+
+            for country, country_group in followup_df.groupby('country'):
+                country_str = str(country)
+                site_groups = _facility_site_groups(country_group, country_str)
+
+                for site, group in site_groups:
+                    label = f"{country_str}/{site}" if site else country_str
+                    try:
+                        validator = DataValidator()
+                        report = validator.validate_stale_records(
+                            group.copy(), stale_followup, country_name=country_str, site_name=site,
+                        )
+                        if not report.empty:
+                            all_reports.append(report)
+                    except Exception as exc:
+                        msg = f"[{label}] Followup stale-record check failed: {exc}"
+                        logger.error(msg)
+                        errors.append(msg)
         except Exception as exc:
-            msg = f"Could not read silver_ibis.followup: {exc}"
+            msg = f"Followup stale-record check failed: {exc}"
             logger.error(msg)
             errors.append(msg)
-            return
-
-        if followup_df.empty:
-            logger.info("silver_ibis.followup is empty — skipping followup stale-record check.")
-            return
-
-        stale_followup = find_stale_uniqueids(self.engine, 'followup')
-        if not stale_followup:
-            return
-
-        for country, country_group in followup_df.groupby('country'):
-            country_str = str(country)
-            site_groups = _facility_site_groups(country_group, country_str)
-
-            for site, group in site_groups:
-                label = f"{country_str}/{site}" if site else country_str
-                try:
-                    validator = DataValidator()
-                    report = validator.validate_stale_records(
-                        group.copy(), stale_followup, country_name=country_str, site_name=site,
-                    )
-                    if not report.empty:
-                        all_reports.append(report)
-                except Exception as exc:
-                    msg = f"[{label}] Followup stale-record check failed: {exc}"
-                    logger.error(msg)
-                    errors.append(msg)
