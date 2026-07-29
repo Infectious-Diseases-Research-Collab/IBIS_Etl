@@ -66,6 +66,7 @@
     "notify_countries": ["country1", "country2"],
     "sms_dm_recipients": [],
     "sms_weekly_report_monday_recipients": [],
+    "stale_removal_recipients": [],
     "keyfiles": {
       "smtp_ini": "secrets/SMTP.ini"
     }

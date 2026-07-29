@@ -6,7 +6,9 @@ import pandas as pd
 from sqlalchemy import text
 
 from modules.incremental_writer import append_history, ensure_current_table, upsert_latest
+from modules.notifier import send_stale_removal_alert
 from modules.silver_rebuild import clean_full_history
+from modules.stale_records import remove_stale_records
 from stages.base import BaseStage, StageResult
 
 logger = logging.getLogger(__name__)
@@ -42,6 +44,17 @@ class BronzeToSilver(BaseStage):
                     )
                 total_written += n
                 errors.extend(errs)
+
+        # Runs after the main transaction commits, and only for the normal
+        # incremental path — --full-rebuild already replaces the whole
+        # current table from bronze history in one shot, so racing that with
+        # a stale-record removal pass right after would be redundant at best.
+        if not full_rebuild:
+            removed: list[dict] = []
+            for table_name in _TABLES:
+                removed.extend(remove_stale_records(self.engine, table_name))
+            if removed:
+                send_stale_removal_alert(removed, self.config)
 
         return StageResult(success=len(errors) == 0, rows_written=total_written, errors=errors)
 

@@ -5,6 +5,17 @@ from unittest.mock import MagicMock, patch
 from stages.bronze_to_silver import BronzeToSilver
 
 
+@pytest.fixture(autouse=True)
+def _no_stale_removal_by_default():
+    """Every test in this file gets a deterministic, no-op stale-record
+    removal unless it explicitly overrides these mocks itself — keeps tests
+    unrelated to stale-record handling from depending on real DB calls
+    happening to fail-safe into an empty result."""
+    with patch('stages.bronze_to_silver.remove_stale_records', return_value=[]) as mock_remove, \
+         patch('stages.bronze_to_silver.send_stale_removal_alert') as mock_alert:
+        yield mock_remove, mock_alert
+
+
 def _make_config(dedup_key='uniqueid', field_overrides=None):
     config = MagicMock()
     config.get.side_effect = lambda key, default=None: {
@@ -399,3 +410,83 @@ def test_creates_tables_even_when_batch_produces_zero_rows():
     assert update_calls
     for call in update_calls:
         assert call.args[1]['uuids'] == ['run-1']
+
+
+def test_removes_stale_records_for_both_tables_after_incremental_processing(_no_stale_removal_by_default):
+    mock_remove, mock_alert = _no_stale_removal_by_default
+    engine = MagicMock()
+    conn = _make_conn_with_meta([])  # nothing unpromoted — irrelevant to this test
+    engine.begin.return_value.__enter__ = MagicMock(return_value=conn)
+    engine.begin.return_value.__exit__ = MagicMock(return_value=False)
+
+    with patch('stages.bronze_to_silver.pd.read_sql'):
+        stage = BronzeToSilver(config=_make_config(), engine=engine)
+        stage.run()
+
+    called_tables = {c.args[1] for c in mock_remove.call_args_list}
+    assert called_tables == {'baseline', 'followup'}
+    for call in mock_remove.call_args_list:
+        assert call.args[0] is engine
+
+
+def test_full_rebuild_skips_stale_record_removal(_no_stale_removal_by_default):
+    """--full-rebuild already replaces the whole current table from bronze
+    history in one shot; running stale-record removal immediately after
+    would just be racing its own rebuild, so it's skipped for this path."""
+    mock_remove, mock_alert = _no_stale_removal_by_default
+    engine = MagicMock()
+    conn = MagicMock()
+    conn.execute.return_value.scalar.return_value = 1
+    engine.begin.return_value.__enter__ = MagicMock(return_value=conn)
+    engine.begin.return_value.__exit__ = MagicMock(return_value=False)
+
+    row = pd.DataFrame({
+        'uniqueid': ['a'], 'countrycode': [2], 'country': ['kenya'],
+        'extracted_at': pd.to_datetime(['2026-01-01']),
+    })
+
+    with patch('stages.bronze_to_silver.pd.read_sql', return_value=row), \
+         patch('stages.bronze_to_silver.clean_full_history', return_value=(row, [], set())), \
+         patch.object(pd.DataFrame, 'to_sql'):
+        stage = BronzeToSilver(config=_make_config(), engine=engine)
+        stage.run(full_rebuild=True)
+
+    mock_remove.assert_not_called()
+    mock_alert.assert_not_called()
+
+
+def test_sends_removal_alert_when_records_were_removed(_no_stale_removal_by_default):
+    mock_remove, mock_alert = _no_stale_removal_by_default
+    removed_baseline = [{
+        'table_name': 'baseline', 'uniqueid': 'u1', 'subjid': 'IBIS0001-1',
+        'tabletnum': '51', 'reason': 'stale_record_missing_from_tablet',
+    }]
+    mock_remove.side_effect = lambda engine, table_name, **kw: (
+        removed_baseline if table_name == 'baseline' else []
+    )
+
+    engine = MagicMock()
+    conn = _make_conn_with_meta([])
+    engine.begin.return_value.__enter__ = MagicMock(return_value=conn)
+    engine.begin.return_value.__exit__ = MagicMock(return_value=False)
+
+    config = _make_config()
+    with patch('stages.bronze_to_silver.pd.read_sql'):
+        stage = BronzeToSilver(config=config, engine=engine)
+        stage.run()
+
+    mock_alert.assert_called_once_with(removed_baseline, config)
+
+
+def test_does_not_send_removal_alert_when_nothing_removed(_no_stale_removal_by_default):
+    mock_remove, mock_alert = _no_stale_removal_by_default
+    engine = MagicMock()
+    conn = _make_conn_with_meta([])
+    engine.begin.return_value.__enter__ = MagicMock(return_value=conn)
+    engine.begin.return_value.__exit__ = MagicMock(return_value=False)
+
+    with patch('stages.bronze_to_silver.pd.read_sql'):
+        stage = BronzeToSilver(config=_make_config(), engine=engine)
+        stage.run()
+
+    mock_alert.assert_not_called()

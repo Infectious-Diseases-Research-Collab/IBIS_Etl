@@ -1,5 +1,6 @@
 """
-Unit tests for modules.stale_records.find_stale_uniqueids.
+Unit tests for modules.stale_records.find_stale_uniqueids and
+modules.stale_records.remove_stale_records.
 """
 from __future__ import annotations
 
@@ -8,7 +9,7 @@ from unittest.mock import MagicMock, patch
 
 import pandas as pd
 
-from modules.stale_records import find_stale_uniqueids
+from modules.stale_records import find_stale_uniqueids, remove_stale_records
 
 
 def _mock_engine():
@@ -175,6 +176,148 @@ class TestFindStaleUniqueids(unittest.TestCase):
             stale = find_stale_uniqueids(engine, 'baseline')
 
         self.assertEqual(stale, {'deleted_one'})
+
+
+def _mock_begin_engine():
+    engine = MagicMock()
+    conn = MagicMock()
+    engine.begin.return_value.__enter__ = MagicMock(return_value=conn)
+    engine.begin.return_value.__exit__ = MagicMock(return_value=False)
+    return engine, conn
+
+
+class TestRemoveStaleRecords(unittest.TestCase):
+
+    def test_returns_empty_list_and_does_nothing_when_no_stale_uniqueids(self):
+        engine, conn = _mock_begin_engine()
+        with patch(
+            'modules.stale_records.find_stale_uniqueids', return_value=set()
+        ) as mock_find:
+            removed = remove_stale_records(engine, 'baseline')
+
+        mock_find.assert_called_once_with(engine, 'baseline', min_absent_syncs=3)
+        self.assertEqual(removed, [])
+        engine.begin.assert_not_called()
+
+    def test_returns_removed_records_with_metadata(self):
+        engine, conn = _mock_begin_engine()
+        rows_df = pd.DataFrame({
+            'uniqueid': ['deleted_one'],
+            'subjid': ['IBIS0001-1'],
+            'tabletnum': ['53'],
+        })
+        with patch('modules.stale_records.find_stale_uniqueids', return_value={'deleted_one'}), \
+             patch('modules.stale_records.pd.read_sql', return_value=rows_df), \
+             patch.object(pd.DataFrame, 'to_sql'):
+            removed = remove_stale_records(engine, 'baseline')
+
+        self.assertEqual(removed, [{
+            'table_name': 'baseline',
+            'uniqueid': 'deleted_one',
+            'subjid': 'IBIS0001-1',
+            'tabletnum': '53',
+            'reason': 'stale_record_missing_from_tablet',
+        }])
+
+    def test_deletes_using_uniqueid_list_from_fetched_rows(self):
+        engine, conn = _mock_begin_engine()
+        rows_df = pd.DataFrame({
+            'uniqueid': ['deleted_one', 'deleted_two'],
+            'subjid': ['IBIS0001-1', 'IBIS0002-2'],
+            'tabletnum': ['53', '53'],
+        })
+        with patch(
+            'modules.stale_records.find_stale_uniqueids',
+            return_value={'deleted_one', 'deleted_two'},
+        ), \
+             patch('modules.stale_records.pd.read_sql', return_value=rows_df), \
+             patch.object(pd.DataFrame, 'to_sql'):
+            remove_stale_records(engine, 'baseline')
+
+        delete_calls = [
+            c for c in conn.execute.call_args_list
+            if 'DELETE FROM silver_ibis' in str(c.args[0])
+        ]
+        self.assertEqual(len(delete_calls), 1)
+        self.assertEqual(
+            sorted(delete_calls[0].args[1]['ids']), ['deleted_one', 'deleted_two']
+        )
+
+    def test_archives_before_deleting(self):
+        engine, conn = _mock_begin_engine()
+        rows_df = pd.DataFrame({
+            'uniqueid': ['deleted_one'], 'subjid': ['IBIS0001-1'], 'tabletnum': ['53'],
+        })
+        call_order = []
+
+        def fake_to_sql(self, name, con, **kwargs):
+            call_order.append('archive')
+
+        def fake_execute(clause, params=None):
+            if 'DELETE' in str(clause):
+                call_order.append('delete')
+            return MagicMock()
+
+        conn.execute.side_effect = fake_execute
+
+        with patch('modules.stale_records.find_stale_uniqueids', return_value={'deleted_one'}), \
+             patch('modules.stale_records.pd.read_sql', return_value=rows_df), \
+             patch.object(pd.DataFrame, 'to_sql', new=fake_to_sql):
+            remove_stale_records(engine, 'baseline')
+
+        self.assertEqual(call_order, ['archive', 'delete'])
+
+    def test_honors_min_absent_syncs_override(self):
+        engine, conn = _mock_begin_engine()
+        with patch(
+            'modules.stale_records.find_stale_uniqueids', return_value=set()
+        ) as mock_find:
+            remove_stale_records(engine, 'baseline', min_absent_syncs=10)
+
+        mock_find.assert_called_once_with(engine, 'baseline', min_absent_syncs=10)
+
+    def test_returns_empty_list_on_invalid_table_name(self):
+        engine, conn = _mock_begin_engine()
+        with patch('modules.stale_records.find_stale_uniqueids') as mock_find:
+            removed = remove_stale_records(engine, 'baseline; DROP TABLE users')
+
+        self.assertEqual(removed, [])
+        mock_find.assert_not_called()
+        engine.begin.assert_not_called()
+
+    def test_returns_empty_list_when_rows_already_gone(self):
+        """A uniqueid flagged stale but no longer present in silver_ibis (e.g.
+        removed by a concurrent/earlier run) must not attempt to archive or
+        delete anything."""
+        engine, conn = _mock_begin_engine()
+        empty_df = pd.DataFrame({'uniqueid': [], 'subjid': [], 'tabletnum': []})
+        with patch('modules.stale_records.find_stale_uniqueids', return_value={'x'}), \
+             patch('modules.stale_records.pd.read_sql', return_value=empty_df), \
+             patch.object(pd.DataFrame, 'to_sql') as mock_to_sql:
+            removed = remove_stale_records(engine, 'baseline')
+
+        self.assertEqual(removed, [])
+        mock_to_sql.assert_not_called()
+
+    def test_returns_empty_list_and_swallows_exception_on_failure(self):
+        engine, conn = _mock_begin_engine()
+        rows_df = pd.DataFrame({'uniqueid': ['x'], 'subjid': ['y'], 'tabletnum': ['1']})
+        with patch('modules.stale_records.find_stale_uniqueids', return_value={'x'}), \
+             patch('modules.stale_records.pd.read_sql', return_value=rows_df), \
+             patch.object(pd.DataFrame, 'to_sql', side_effect=Exception('boom')):
+            removed = remove_stale_records(engine, 'baseline')
+
+        self.assertEqual(removed, [])
+
+    def test_custom_reason_is_recorded(self):
+        engine, conn = _mock_begin_engine()
+        rows_df = pd.DataFrame({'uniqueid': ['x'], 'subjid': ['y'], 'tabletnum': ['1']})
+        with patch('modules.stale_records.find_stale_uniqueids', return_value={'x'}), \
+             patch('modules.stale_records.pd.read_sql', return_value=rows_df), \
+             patch.object(pd.DataFrame, 'to_sql'):
+            removed = remove_stale_records(engine, 'baseline', reason='manual_cleanup')
+
+        self.assertEqual(removed[0]['reason'], 'manual_cleanup')
 
 
 if __name__ == '__main__':

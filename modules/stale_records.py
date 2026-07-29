@@ -118,3 +118,67 @@ def find_stale_uniqueids(engine, table_name: str, min_absent_syncs: int = 2) -> 
     except Exception as exc:
         logger.warning(f"find_stale_uniqueids({table_name}): failed, returning empty set: {exc}")
         return set()
+
+
+def remove_stale_records(
+    engine,
+    table_name: str,
+    min_absent_syncs: int = 3,
+    reason: str = 'stale_record_missing_from_tablet',
+) -> list[dict]:
+    """
+    Delete records from silver_ibis.<table_name> confirmed absent from their
+    tablet's last `min_absent_syncs` successful syncs, archiving a tombstone
+    row (table_name, uniqueid, subjid, tabletnum, reason, removed_at) into
+    ops.removed_records for each one first.
+
+    Uses a stricter min_absent_syncs than find_stale_uniqueids's WARNING-level
+    default (2) since deletion is harder to reverse than flagging. The full
+    original row is not duplicated here — it already lives permanently in
+    bronze_ibis and silver_ibis.<table_name>_history (both append-only), so
+    this only needs to record that a removal happened and why.
+
+    Never raises: any failure degrades to "nothing removed this run" (returns
+    an empty list) rather than failing the calling pipeline stage.
+    """
+    try:
+        table_name = _validate_table_name(table_name)
+    except ValueError as exc:
+        logger.warning(f"remove_stale_records({table_name!r}): {exc}")
+        return []
+
+    stale_ids = find_stale_uniqueids(engine, table_name, min_absent_syncs=min_absent_syncs)
+    if not stale_ids:
+        return []
+
+    try:
+        with engine.begin() as conn:
+            rows = pd.read_sql(
+                text(
+                    f'SELECT uniqueid, subjid, tabletnum FROM silver_ibis.{table_name} '
+                    'WHERE uniqueid = ANY(:ids)'
+                ),
+                conn, params={'ids': list(stale_ids)},
+            )
+            if rows.empty:
+                return []
+
+            archive = rows.copy()
+            archive['table_name'] = table_name
+            archive['reason'] = reason
+            archive.to_sql('removed_records', conn, schema='ops', if_exists='append', index=False)
+
+            conn.execute(
+                text(f'DELETE FROM silver_ibis.{table_name} WHERE uniqueid = ANY(:ids)'),
+                {'ids': rows['uniqueid'].tolist()},
+            )
+
+        removed = archive[['table_name', 'uniqueid', 'subjid', 'tabletnum', 'reason']].to_dict('records')
+        logger.warning(
+            f"remove_stale_records({table_name}): removed {len(removed)} record(s): "
+            f"{[r['subjid'] for r in removed]}"
+        )
+        return removed
+    except Exception as exc:
+        logger.warning(f"remove_stale_records({table_name}): failed, removed nothing: {exc}")
+        return []

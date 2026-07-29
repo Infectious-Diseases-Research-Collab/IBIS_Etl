@@ -841,3 +841,56 @@ def send_sms_flagged_alert(flagged: list[dict], config, engine) -> bool:
         return False
     logger.info('Flagged SMS alert sent to %s (%d messages).', dm_recipients, len(flagged))
     return True
+
+
+def send_stale_removal_alert(removed: list[dict], config) -> bool:
+    """
+    Notify the study team when modules.stale_records.remove_stale_records
+    has deleted confirmed-stale records from silver_ibis. Only meaningful to
+    call when removed is non-empty, but a no-op either way if it's empty.
+
+    Returns True only if the alert was actually sent, False otherwise (no
+    email config, no recipients, nothing removed, or an SMTP failure).
+    """
+    if not removed:
+        return False
+
+    email_cfg = config.get('email')
+    if not email_cfg:
+        return False
+
+    recipients = email_cfg.get('stale_removal_recipients', [])
+    if not recipients:
+        logger.warning("No stale_removal_recipients configured — removal alert not sent.")
+        return False
+
+    today_str = date.today().strftime('%d %b %Y')
+    subject = f'IBIS — Stale Records Removed: {today_str}'
+
+    sep = '─' * 85
+    lines = [
+        f'IBIS — Stale Records Removed: {today_str}',
+        sep,
+        'The following records were confirmed absent from their tablet\'s recent',
+        'syncs and have been removed from silver_ibis (full data remains in',
+        'bronze_ibis and the corresponding _history table).',
+        '',
+        f'{"Table":<12} {"Subjid":<20} {"Tablet":<8} Reason',
+        sep,
+    ]
+    for r in removed:
+        lines.append(
+            f"{r['table_name']:<12} {r['subjid']:<20} {r['tabletnum']:<8} {r['reason']}"
+        )
+    lines.append(sep)
+
+    plain = '\n'.join(lines)
+    html = f'<pre style="font-family:monospace;font-size:13px">{_html.escape(plain)}</pre>'
+
+    try:
+        _send(email_cfg, recipients, subject, plain, html)
+    except Exception as exc:
+        logger.error('Stale removal alert email failed: %s', exc)
+        return False
+    logger.info('Stale removal alert sent to %s (%d record(s)).', recipients, len(removed))
+    return True

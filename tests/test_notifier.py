@@ -643,3 +643,91 @@ def test_build_weekly_sms_df_zero_due_no_crash():
         row = df[df[''] == label].iloc[0]
         assert row['%'] == ''
         assert row['Bushenyi HCIV'] == ''
+
+
+# ---------------------------------------------------------------------------
+# send_stale_removal_alert
+# ---------------------------------------------------------------------------
+
+def test_send_stale_removal_alert_lists_removed_records(tmp_path):
+    from modules.notifier import send_stale_removal_alert
+
+    email_cfg = _make_email_cfg(tmp_path)
+    email_cfg['stale_removal_recipients'] = ['ruhamyankaka@idrc-uganda.org']
+    config = _config(email_cfg)
+
+    removed = [
+        {
+            'table_name': 'baseline', 'uniqueid': '567a68c1-881f-4f09-92aa-eb905addc21b',
+            'subjid': 'IBIS1129951-51392', 'tabletnum': '51',
+            'reason': 'stale_record_missing_from_tablet',
+        },
+        {
+            'table_name': 'baseline', 'uniqueid': 'f21bb9a3-078a-4de7-bb91-63a2ee05602b',
+            'subjid': 'IBIS1149953-5319', 'tabletnum': '53',
+            'reason': 'stale_record_missing_from_tablet',
+        },
+    ]
+
+    mock_smtp_instance = MagicMock()
+    with patch('smtplib.SMTP') as mock_smtp_cls:
+        mock_smtp_cls.return_value.__enter__.return_value = mock_smtp_instance
+        sent = send_stale_removal_alert(removed, config)
+
+    assert sent is True
+    assert mock_smtp_instance.sendmail.call_args[0][1] == ['ruhamyankaka@idrc-uganda.org']
+    body = _plain_text_body(mock_smtp_instance.sendmail.call_args[0][2])
+    assert 'IBIS1129951-51392' in body
+    assert 'IBIS1149953-5319' in body
+    assert 'baseline' in body
+    assert 'stale_record_missing_from_tablet' in body
+
+
+def test_send_stale_removal_alert_skips_when_no_recipients(tmp_path):
+    from modules.notifier import send_stale_removal_alert
+
+    email_cfg = _make_email_cfg(tmp_path)  # no stale_removal_recipients
+    config = _config(email_cfg)
+    removed = [{
+        'table_name': 'baseline', 'uniqueid': 'x', 'subjid': 'IBIS0001-1',
+        'tabletnum': '1', 'reason': 'stale_record_missing_from_tablet',
+    }]
+
+    with patch('smtplib.SMTP') as mock_smtp_cls:
+        sent = send_stale_removal_alert(removed, config)
+
+    mock_smtp_cls.assert_not_called()
+    assert sent is False
+
+
+def test_send_stale_removal_alert_skips_when_nothing_removed(tmp_path):
+    """Only called when removed is non-empty by convention, but must also be
+    a safe no-op if called with an empty list."""
+    from modules.notifier import send_stale_removal_alert
+
+    email_cfg = _make_email_cfg(tmp_path)
+    email_cfg['stale_removal_recipients'] = ['ruhamyankaka@idrc-uganda.org']
+    config = _config(email_cfg)
+
+    with patch('smtplib.SMTP') as mock_smtp_cls:
+        sent = send_stale_removal_alert([], config)
+
+    mock_smtp_cls.assert_not_called()
+    assert sent is False
+
+
+def test_send_stale_removal_alert_returns_false_on_smtp_error(tmp_path):
+    from modules.notifier import send_stale_removal_alert
+
+    email_cfg = _make_email_cfg(tmp_path)
+    email_cfg['stale_removal_recipients'] = ['ruhamyankaka@idrc-uganda.org']
+    config = _config(email_cfg)
+    removed = [{
+        'table_name': 'baseline', 'uniqueid': 'x', 'subjid': 'IBIS0001-1',
+        'tabletnum': '1', 'reason': 'stale_record_missing_from_tablet',
+    }]
+
+    with patch('smtplib.SMTP', side_effect=smtplib.SMTPException('conn refused')):
+        sent = send_stale_removal_alert(removed, config)
+
+    assert sent is False
