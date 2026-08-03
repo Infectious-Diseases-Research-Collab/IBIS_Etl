@@ -76,6 +76,7 @@
     "messages_dir": "data/sms_messages",
     "blasta_ini":   "secrets/BLASTA.ini",
     "max_retries":  3,
-    "dry_run":      false
+    "dry_run":      false,
+    "paused":       false
   }
 }

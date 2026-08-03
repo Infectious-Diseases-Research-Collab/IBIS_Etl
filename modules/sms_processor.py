@@ -211,6 +211,7 @@ class SmsProcessor:
         sms_cfg = config.get('sms') or {}
         self._max_retries = sms_cfg.get('max_retries', 3)
         self._dry_run = sms_cfg.get('dry_run', False)
+        self._paused = sms_cfg.get('paused', False)
         self._countrycode = sms_cfg.get('countrycode', '1')
         self._client: BlastaClient | None = None
 
@@ -574,6 +575,9 @@ class SmsProcessor:
     def run(self) -> SendResult:
         """Full daily run: sync queue then send due messages."""
         self.sync_queue()
+        if self._paused:
+            logger.info("SMS sending paused (sms.paused=true in config) — queue synced, no messages sent.")
+            return SendResult()
         return self.send_due_messages()
 
     # ------------------------------------------------------------------
