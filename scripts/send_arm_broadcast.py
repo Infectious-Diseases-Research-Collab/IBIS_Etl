@@ -99,3 +99,63 @@ def print_summary(resolved: list[dict], skipped: list[dict]) -> None:
         print("\nSkipped (no message for their language):")
         for s in skipped:
             print(f"  {s['subjid']} (preferred_language_text={s['preferred_language_text']!r})")
+
+
+def log_result(
+    engine, *, arm: str, subjid: str, mobile_number: str, language: str,
+    message_text: str, status: str, provider_message_id: str | None,
+    error_message: str | None, actor: str, sent_at,
+) -> None:
+    with engine.begin() as conn:
+        conn.execute(text("""
+            INSERT INTO sms.broadcast_log
+                (arm, subjid, mobile_number, language, message_text,
+                 status, provider_message_id, error_message, actor, sent_at)
+            VALUES
+                (:arm, :subjid, :mobile_number, :language, :message_text,
+                 :status, :provider_message_id, :error_message, :actor, :sent_at)
+        """), {
+            "arm": arm, "subjid": subjid, "mobile_number": mobile_number,
+            "language": language, "message_text": message_text, "status": status,
+            "provider_message_id": provider_message_id, "error_message": error_message,
+            "actor": actor, "sent_at": sent_at,
+        })
+
+
+def send_broadcast(
+    engine, config, arm: str, resolved: list[dict], actor: str,
+) -> tuple[int, int]:
+    """Send every resolved recipient's message via Blasta. One failure does
+    not stop the rest. Every attempt (sent or failed) is logged. Returns
+    (sent_count, failed_count)."""
+    sms_cfg = config.get('sms') or {}
+    username, password = _load_blasta_creds(sms_cfg['blasta_ini'], sms_cfg.get('blasta_key'))
+    client = BlastaClient(username, password, sms_cfg.get('max_retries', 3))
+
+    sent = 0
+    failed = 0
+    for r in resolved:
+        provider_msg_id = None
+        error_msg = None
+        status = 'failed'
+        sent_at = None
+        try:
+            response = client.send(r['mobile_number'], r['message_text'])
+            provider_msg_id = response.get('msg_id')
+            status = 'sent'
+            sent_at = datetime.now(timezone.utc)
+            sent += 1
+            logger.info("Sent to %s (%s) msg_id=%s", r['subjid'], r['language'], provider_msg_id)
+        except Exception as exc:
+            error_msg = str(exc)
+            failed += 1
+            logger.error("Failed to send to %s (%s): %s", r['subjid'], r['language'], exc)
+
+        log_result(
+            engine, arm=arm, subjid=r['subjid'], mobile_number=r['mobile_number'],
+            language=r['language'], message_text=r['message_text'], status=status,
+            provider_message_id=provider_msg_id, error_message=error_msg,
+            actor=actor, sent_at=sent_at,
+        )
+
+    return sent, failed

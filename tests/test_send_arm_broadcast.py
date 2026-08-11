@@ -101,3 +101,58 @@ def test_print_summary_runs_without_error(capsys):
     assert 'Recipients: 1' in out
     assert 'skipped: 1' in out
     assert 'S9' in out
+
+
+def test_send_broadcast_logs_sent_and_failed(monkeypatch):
+    from scripts.send_arm_broadcast import send_broadcast
+
+    engine, conn = make_engine_mock()
+    config = MagicMock()
+    config.get.return_value = {
+        'blasta_ini': 'secrets/BLASTA.ini', 'blasta_key': 'secrets/BLASTA.key',
+        'max_retries': 3,
+    }
+
+    fake_client = MagicMock()
+    fake_client.send.side_effect = [
+        {'msg_id': 'MID1'},
+        Exception('Blasta API error: insufficient credits'),
+    ]
+
+    monkeypatch.setattr(
+        'scripts.send_arm_broadcast._load_blasta_creds',
+        lambda ini, key: ('user', 'pass'),
+    )
+    monkeypatch.setattr(
+        'scripts.send_arm_broadcast.BlastaClient',
+        lambda username, password, max_retries: fake_client,
+    )
+
+    resolved = [
+        {'subjid': 'S1', 'mobile_number': '256700000001', 'language': 'English',
+         'message_text': 'msg1'},
+        {'subjid': 'S2', 'mobile_number': '256700000002', 'language': 'Luganda',
+         'message_text': 'msg2'},
+    ]
+
+    sent, failed = send_broadcast(engine, config, 'Incentive', resolved, actor='tester')
+
+    assert (sent, failed) == (1, 1)
+    assert fake_client.send.call_count == 2
+
+    insert_calls = [
+        c for c in conn.execute.call_args_list
+        if 'INSERT INTO sms.broadcast_log' in str(c.args[0])
+    ]
+    assert len(insert_calls) == 2
+
+    first_params = insert_calls[0].args[1]
+    assert first_params['subjid'] == 'S1'
+    assert first_params['status'] == 'sent'
+    assert first_params['provider_message_id'] == 'MID1'
+    assert first_params['actor'] == 'tester'
+
+    second_params = insert_calls[1].args[1]
+    assert second_params['subjid'] == 'S2'
+    assert second_params['status'] == 'failed'
+    assert 'insufficient credits' in second_params['error_message']
