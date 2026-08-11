@@ -159,3 +159,56 @@ def send_broadcast(
         )
 
     return sent, failed
+
+
+def _run(args, config, engine) -> None:
+    messages = json.loads(Path(args.messages_file).read_text(encoding='utf-8'))
+
+    init_schemas(engine)
+    init_sms_tables(engine)
+
+    sms_cfg = config.get('sms') or {}
+    countrycode = sms_cfg.get('countrycode', '1')
+
+    resolved, skipped = resolve_recipients(engine, args.arm, countrycode, messages)
+    print_summary(resolved, skipped)
+
+    if not args.send:
+        print("\nDry run only — nothing sent. Re-run with --send to actually send.")
+        return
+
+    if not resolved:
+        print("\nNo recipients to send to. Exiting.")
+        sys.exit(0)
+
+    confirm = input(
+        f"\nType the recipient count ({len(resolved)}) to confirm sending: "
+    ).strip()
+    if confirm != str(len(resolved)):
+        print("Confirmation did not match recipient count — aborting, nothing sent.")
+        sys.exit(1)
+
+    sent, failed = send_broadcast(engine, config, args.arm, resolved, args.actor)
+    print(f"\nDone — sent: {sent}  failed: {failed}  skipped: {len(skipped)}")
+    sys.exit(1 if failed > 0 else 0)
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(description='Send an ad-hoc broadcast SMS to a study arm')
+    parser.add_argument('--arm', required=True,
+                         help="Study arm, e.g. 'Incentive' (matches ibis.baseline.arm_text)")
+    parser.add_argument('--messages-file', required=True,
+                         help='Path to JSON file: {"English": "...", "Luganda": "...", "Runyankole": "..."}')
+    parser.add_argument('--actor', required=True,
+                         help='Name/email of the person requesting this broadcast '
+                              '(recorded in sms.broadcast_log)')
+    parser.add_argument('--send', action='store_true', help='Actually send (default is dry run)')
+    args = parser.parse_args()
+
+    config = ConfigLoader('config.json')
+    engine = create_db_engine(config)
+    _run(args, config, engine)
+
+
+if __name__ == '__main__':
+    main()

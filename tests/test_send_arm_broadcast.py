@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+from argparse import Namespace
 from collections import namedtuple
 from unittest.mock import MagicMock
+import json
 
 import pytest
 
@@ -156,3 +158,77 @@ def test_send_broadcast_logs_sent_and_failed(monkeypatch):
     assert second_params['subjid'] == 'S2'
     assert second_params['status'] == 'failed'
     assert 'insufficient credits' in second_params['error_message']
+
+
+def _args(**overrides):
+    defaults = dict(arm='Incentive', messages_file=None, actor='tester', send=False)
+    defaults.update(overrides)
+    return Namespace(**defaults)
+
+
+def test_run_dry_run_does_not_send(tmp_path, monkeypatch, capsys):
+    from scripts.send_arm_broadcast import _run
+
+    messages_file = tmp_path / 'messages.json'
+    messages_file.write_text(json.dumps(MESSAGES), encoding='utf-8')
+
+    engine, conn = make_engine_mock([Row('S1', '256700000001', 'English')])
+    config = MagicMock()
+
+    send_mock = MagicMock()
+    monkeypatch.setattr('scripts.send_arm_broadcast.send_broadcast', send_mock)
+    monkeypatch.setattr('scripts.send_arm_broadcast.init_schemas', MagicMock())
+    monkeypatch.setattr('scripts.send_arm_broadcast.init_sms_tables', MagicMock())
+
+    _run(_args(messages_file=str(messages_file), send=False), config, engine)
+
+    send_mock.assert_not_called()
+    assert 'Dry run only' in capsys.readouterr().out
+
+
+def test_run_send_requires_matching_confirmation(tmp_path, monkeypatch, capsys):
+    from scripts.send_arm_broadcast import _run
+
+    messages_file = tmp_path / 'messages.json'
+    messages_file.write_text(json.dumps(MESSAGES), encoding='utf-8')
+
+    engine, conn = make_engine_mock([Row('S1', '256700000001', 'English')])
+    config = MagicMock()
+
+    send_mock = MagicMock()
+    monkeypatch.setattr('scripts.send_arm_broadcast.send_broadcast', send_mock)
+    monkeypatch.setattr('scripts.send_arm_broadcast.init_schemas', MagicMock())
+    monkeypatch.setattr('scripts.send_arm_broadcast.init_sms_tables', MagicMock())
+    monkeypatch.setattr('builtins.input', lambda prompt: '2')  # wrong count (actual is 1)
+
+    with pytest.raises(SystemExit) as exc_info:
+        _run(_args(messages_file=str(messages_file), send=True), config, engine)
+
+    assert exc_info.value.code == 1
+    send_mock.assert_not_called()
+    assert 'did not match' in capsys.readouterr().out
+
+
+def test_run_send_with_matching_confirmation_sends(tmp_path, monkeypatch, capsys):
+    from scripts.send_arm_broadcast import _run
+
+    messages_file = tmp_path / 'messages.json'
+    messages_file.write_text(json.dumps(MESSAGES), encoding='utf-8')
+
+    engine, conn = make_engine_mock([Row('S1', '256700000001', 'English')])
+    config = MagicMock()
+
+    send_mock = MagicMock(return_value=(1, 0))
+    monkeypatch.setattr('scripts.send_arm_broadcast.send_broadcast', send_mock)
+    monkeypatch.setattr('scripts.send_arm_broadcast.init_schemas', MagicMock())
+    monkeypatch.setattr('scripts.send_arm_broadcast.init_sms_tables', MagicMock())
+    monkeypatch.setattr('builtins.input', lambda prompt: '1')  # matches recipient count
+
+    with pytest.raises(SystemExit) as exc_info:
+        _run(_args(messages_file=str(messages_file), send=True), config, engine)
+
+    assert exc_info.value.code == 0
+    send_mock.assert_called_once_with(engine, config, 'Incentive', [{
+        'subjid': 'S1', 'mobile_number': '256700000001',
+        'language': 'English', 'message_text': 'Pause notice (EN)',
+    }], 'tester')
