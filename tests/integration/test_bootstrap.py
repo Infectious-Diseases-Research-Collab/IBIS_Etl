@@ -29,6 +29,7 @@ def test_bootstrap_creates_expected_schemas_and_tables(clean_engine):
         }
         assert 'queue' in sms_tables
         assert 'log' in sms_tables
+        assert 'broadcast_log' in sms_tables
 
 
 def test_bootstrap_is_idempotent(clean_engine):

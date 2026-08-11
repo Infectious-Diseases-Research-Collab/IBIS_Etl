@@ -63,6 +63,27 @@ CREATE TABLE IF NOT EXISTS sms.resend_log (
     resent_at  TIMESTAMP DEFAULT NOW()
 );
 
+-- Audit trail for ad-hoc, per-language broadcast sends to a whole arm
+-- (scripts/send_arm_broadcast.py) — separate from sms.log/sms.queue because
+-- those carry a NOT NULL week + UNIQUE(subjid, week) tied to the templated
+-- week-8/week-11 pipeline, and sms.message_status (a view) joins on that
+-- assumption. A broadcast has no "week", so it gets its own table instead
+-- of forcing a sentinel value through the templated tables.
+CREATE TABLE IF NOT EXISTS sms.broadcast_log (
+    id                   SERIAL PRIMARY KEY,
+    arm                  TEXT NOT NULL,
+    subjid               TEXT NOT NULL,
+    mobile_number        TEXT NOT NULL,
+    language             TEXT NOT NULL,
+    message_text         TEXT NOT NULL,
+    status               TEXT NOT NULL CHECK (status IN ('sent', 'failed')),
+    provider_message_id  TEXT,
+    error_message        TEXT,
+    actor                TEXT NOT NULL,
+    sent_at              TIMESTAMP,
+    created_at           TIMESTAMP DEFAULT NOW()
+);
+
 CREATE INDEX IF NOT EXISTS sms_log_queue_id_idx ON sms.log (queue_id);
 
 -- sms.message_status (one row per participant/week, consolidated delivery
