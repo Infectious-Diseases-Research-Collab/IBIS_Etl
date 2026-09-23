@@ -22,7 +22,7 @@ CREATE TABLE IF NOT EXISTS sms.queue (
     appointment_date DATE,
     opted_out        BOOLEAN DEFAULT FALSE,
     status           TEXT    NOT NULL DEFAULT 'pending'
-                             CHECK (status IN ('pending', 'sent', 'failed', 'skipped')),
+                             CHECK (status IN ('pending', 'sent', 'failed', 'skipped', 'DuringPause')),
     created_at       TIMESTAMP DEFAULT NOW(),
     UNIQUE (subjid, week)
 );
