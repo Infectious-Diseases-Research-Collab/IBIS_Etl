@@ -1309,7 +1309,9 @@ class DataValidator:
             return issues
 
         consent = pd.to_numeric(df['consent'], errors='coerce')
-        valid_codes = {0, 1, self.skip_code}
+        # 2 = declined consent after screening (distinct from 0; see
+        # eligibility_check, which accepts 1/2 where 2 is this same decline).
+        valid_codes = {0, 1, 2, self.skip_code}
 
         has_consent = consent.notna()
         invalid_code = has_consent & ~consent.isin(valid_codes)
