@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import logging
 import os
+import shutil
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 import py7zr
@@ -98,6 +99,10 @@ def _process_tablet(
         logger.warning(f"[{country}] Corrupt archive '{filename}': {exc} — skipping.")
         if os.path.exists(local_archive):
             os.remove(local_archive)
+        # A failure mid-extraction leaves a half-written folder; removing it
+        # stops the next run treating this archive as already extracted.
+        if os.path.exists(tablet_extract_dir):
+            shutil.rmtree(tablet_extract_dir)
         warning = dict(
             check='corrupt_archive',
             severity='ERROR',

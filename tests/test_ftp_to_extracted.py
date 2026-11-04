@@ -330,3 +330,33 @@ def test_all_candidate_archives_corrupt_is_warning_not_error(tmp_path):
     warning = result.warnings[0]
     assert warning['affected_tablets'] == names[0]
     assert 'all older archives were also corrupt' in warning['detail']
+
+
+def test_partial_extraction_folder_removed_so_next_run_retries(tmp_path):
+    """A failure partway through extractall leaves files behind. That folder
+    must be removed, or the next run skips the archive as 'already extracted'
+    and the ETL ingests a partial database."""
+    newest = 'Tablet41_2026_11_04-17_10_10.7z'
+    previous = 'Tablet41_2026_11_04-09_20_33.7z'
+    partial_dir = tmp_path / 'Extracted' / 'Kenya' / newest[:-3]
+
+    def fake_sevenz(path, *args, **kwargs):
+        name = os.path.basename(path)
+        m = MagicMock()
+        m.__enter__ = MagicMock(return_value=m)
+        m.__exit__ = MagicMock(return_value=False)
+
+        def extractall(path):
+            os.makedirs(path, exist_ok=True)
+            if name == newest:
+                open(os.path.join(path, 'IBIS_pilot.mdb'), 'w').close()
+                raise Exception('CRC error')
+        m.extractall.side_effect = extractall
+        return m
+
+    result, downloads = _run_with_archives(tmp_path, [newest, previous], fake_sevenz)
+
+    assert not partial_dir.exists()
+    assert downloads == [newest, previous]
+    assert result.rows_written == 1
+    assert result.warnings[0]['affected_tablets'] == newest
