@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+import email
+from datetime import date
 import smtplib
+from email.header import decode_header, make_header
 import pandas as pd
 import pytest
 from unittest.mock import patch, MagicMock
@@ -10,6 +13,7 @@ from modules.notifier import (
     _query_validation_report,
     _build_stage_summary,
     _build_validation_summary,
+    _split_by_site,
     send_pipeline_report,
 )
 from stages.base import StageResult
@@ -99,6 +103,34 @@ def test_build_validation_summary_groups_by_severity_country_site():
     assert 'Uganda / 11 (Y)' in text
     assert 'dup_id' in text
     assert 'see attachment' in text.lower()
+
+
+def test_split_by_site_derives_site_from_subjid_and_repeats_cross_site_rows():
+    report = pd.DataFrame({
+        'severity': ['WARNING', 'WARNING', 'ERROR', 'WARNING'],
+        'check': ['similar_name', 'similar_name', 'dob_eligibility', 'corrupt_archive'],
+        'country': ['uganda'] * 4,
+        'site': ['', '', '14 (Ruhoko HCIV (Ibanda))', ''],
+        'record_count': [2, 2, 1, 1],
+        'affected_subjids': [
+            'IBIS1119947-47196; IBIS1129951-51503',   # Bushenyi + Ishaka
+            'SCRN1149943-43437; SCRN1149953-5379',    # both Ruhoko, screening ids
+            'IBIS1149942-42394',
+            '',
+        ],
+    })
+    split = _split_by_site(report)
+
+    cross = split[split['check'] == 'similar_name'].set_index('site')
+    assert set(cross.index) == {
+        '11 (Bushenyi HCIV)', '12 (Ishaka Adventist Hospital (Bushenyi))', '14 (Ruhoko HCIV (Ibanda))',
+    }
+    assert cross.loc['11 (Bushenyi HCIV)', 'site_subjids'] == 'IBIS1119947-47196'
+    assert cross.loc['11 (Bushenyi HCIV)', 'other_sites'] == '12 (Ishaka Adventist Hospital (Bushenyi))'
+    assert cross.loc['14 (Ruhoko HCIV (Ibanda))', 'other_sites'] == ''
+    # Explicit site kept as-is; no site and no subjids goes to Unassigned, listed last
+    assert (split['check'] == 'dob_eligibility').sum() == 1
+    assert split.iloc[-1]['site'] == 'Unassigned'
 
 
 def test_build_validation_summary_empty_df_returns_sep_only():
@@ -220,6 +252,127 @@ def test_send_pipeline_report_field_email_sent_on_issues(tmp_path):
     assert ['admin@example.com'] in recipients_seen       # pipeline email
     assert ['ug-team@example.com'] in recipients_seen     # Uganda field email
     assert ['ke-team@example.com'] not in recipients_seen # Kenya had no issues
+
+
+def test_send_pipeline_report_excluded_checks_left_out_of_field_email(tmp_path):
+    """Checks in field_report_exclude_checks don't appear in, or trigger, the field email."""
+    email_cfg = _make_email_cfg(tmp_path)
+    email_cfg['field_report_exclude_checks'] = ['duration_too_short', 'unusual_interview_hour']
+    config = _config(email_cfg)
+    results = {'mdb_to_bronze': StageResult(success=True)}
+    report = pd.DataFrame({
+        'severity': ['WARNING', 'WARNING', 'WARNING'],
+        'check': ['duration_too_short', 'dup_phone', 'unusual_interview_hour'],
+        'country': ['Uganda', 'Uganda', 'Kenya'], 'site': ['Mbarara'] * 3,
+        'record_count': [1, 2, 1], 'detail': ['test'] * 3,
+        'affected_subjids': ['IBIS001'] * 3, 'affected_tablets': ['44'] * 3,
+    })
+
+    sendmail_calls = []
+    mock_smtp_instance = MagicMock()
+    mock_smtp_instance.sendmail.side_effect = lambda *a, **kw: sendmail_calls.append(a)
+
+    with patch('modules.notifier._query_validation_report', return_value=report):
+        with patch('smtplib.SMTP') as mock_smtp_cls:
+            mock_smtp_cls.return_value.__enter__.return_value = mock_smtp_instance
+            send_pipeline_report(
+                results=results, stages=['mdb_to_bronze'],
+                engine=MagicMock(), config=config,
+            )
+
+    by_recipient = {tuple(call[1]): call[2] for call in sendmail_calls}
+    # Kenya's only issue was excluded, so no Kenya email at all
+    assert ('ke-team@example.com',) not in by_recipient
+    parsed = email.message_from_string(by_recipient[('ug-team@example.com',)])
+    ug_msg = ''.join(
+        part.get_payload(decode=True).decode()
+        for part in parsed.walk() if not part.is_multipart()
+    )
+    assert 'dup_phone' in ug_msg
+    assert 'duration_too_short' not in ug_msg
+
+
+def test_send_pipeline_report_site_routing_sends_one_email_per_site(tmp_path):
+    """A country in field_site_recipients gets one email per site, cc'd; unmatched sites fall back."""
+    email_cfg = _make_email_cfg(tmp_path)
+    email_cfg['field_site_recipients'] = {
+        'uganda': {
+            'cc': ['lead@example.com'],
+            'sites': {'11': ['bushenyi@example.com'], '14': ['ruhoko@example.com']},
+        },
+    }
+    config = _config(email_cfg)
+    results = {'mdb_to_bronze': StageResult(success=True)}
+    report = pd.DataFrame({
+        'severity': ['WARNING', 'ERROR', 'WARNING', 'WARNING'],
+        'check': ['duplicate_name', 'dob_eligibility', 'duplicate_phone', 'dup_x'],
+        'country': ['Uganda', 'Uganda', 'Uganda', 'Kenya'],
+        'site': ['', '14 (Ruhoko HCIV (Ibanda))', '', '21 (Homa Bay)'],
+        'record_count': [2, 1, 2, 1], 'detail': ['test'] * 4,
+        'affected_subjids': ['IBIS1119947-1; IBIS1119947-2', 'IBIS1149942-1',
+                             'XYZ-1; XYZ-2', 'IBIS2219930-1'],
+        'affected_tablets': ['47', '42', '', '30'],
+    })
+
+    sendmail_calls = []
+    mock_smtp_instance = MagicMock()
+    mock_smtp_instance.sendmail.side_effect = lambda *a, **kw: sendmail_calls.append(a)
+
+    with patch('modules.notifier._query_validation_report', return_value=report):
+        with patch('smtplib.SMTP') as mock_smtp_cls:
+            mock_smtp_cls.return_value.__enter__.return_value = mock_smtp_instance
+            send_pipeline_report(
+                results=results, stages=['mdb_to_bronze'],
+                engine=MagicMock(), config=config,
+            )
+
+    by_first = {call[1][0]: email.message_from_string(call[2]) for call in sendmail_calls}
+    envelope = {call[1][0]: call[1] for call in sendmail_calls}
+
+    assert envelope['bushenyi@example.com'] == ['bushenyi@example.com', 'lead@example.com']
+    assert by_first['bushenyi@example.com']['Cc'] == 'lead@example.com'
+    subject = str(make_header(decode_header(by_first['bushenyi@example.com']['Subject'])))
+    assert 'Bushenyi HCIV' in subject
+    assert envelope['ruhoko@example.com'] == ['ruhoko@example.com', 'lead@example.com']
+    # Unmatched subjids fall back to the country's field_recipients, not cc'd
+    assert envelope['ug-team@example.com'] == ['ug-team@example.com']
+    # Kenya has no site routing, so it keeps the single country email
+    assert envelope['ke-team@example.com'] == ['ke-team@example.com']
+
+
+@pytest.mark.parametrize('today, field_sent', [
+    (date(2026, 11, 4), True),    # Wednesday
+    (date(2026, 11, 5), False),   # Thursday
+])
+def test_send_pipeline_report_field_report_days(tmp_path, today, field_sent):
+    """Field emails only go out on field_report_days; the pipeline email always does."""
+    email_cfg = _make_email_cfg(tmp_path)
+    email_cfg['field_report_days'] = ['Mon', 'Wed', 'Fri']
+    config = _config(email_cfg)
+    report = pd.DataFrame({
+        'severity': ['WARNING'], 'check': ['dup_phone'],
+        'country': ['Uganda'], 'site': ['11 (Bushenyi HCIV)'],
+        'record_count': [2], 'detail': ['test'],
+        'affected_subjids': ['IBIS1119947-1'], 'affected_tablets': ['47'],
+    })
+
+    sendmail_calls = []
+    mock_smtp_instance = MagicMock()
+    mock_smtp_instance.sendmail.side_effect = lambda *a, **kw: sendmail_calls.append(a)
+
+    with patch('modules.notifier.date') as mock_date:
+        mock_date.today.return_value = today
+        with patch('modules.notifier._query_validation_report', return_value=report):
+            with patch('smtplib.SMTP') as mock_smtp_cls:
+                mock_smtp_cls.return_value.__enter__.return_value = mock_smtp_instance
+                send_pipeline_report(
+                    results={'mdb_to_bronze': StageResult(success=True)},
+                    stages=['mdb_to_bronze'], engine=MagicMock(), config=config,
+                )
+
+    recipients_seen = [call[1] for call in sendmail_calls]
+    assert ['admin@example.com'] in recipients_seen
+    assert (['ug-team@example.com'] in recipients_seen) == field_sent
 
 
 def test_send_pipeline_report_does_not_raise_on_smtp_error(tmp_path):

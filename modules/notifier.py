@@ -3,6 +3,7 @@ from __future__ import annotations
 import html as _html
 import io
 import logging
+import re
 import smtplib
 import ssl
 from datetime import date
@@ -12,6 +13,7 @@ from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 from cryptography.fernet import Fernet
 import pandas as pd
+from modules.reference_data import FACILITY_CODES_KE, FACILITY_CODES_UG
 from modules.utils import load_fernet_key
 from stages.base import StageResult
 
@@ -87,21 +89,88 @@ def _build_validation_summary(report_df: pd.DataFrame | None) -> str:
         return 'Validation report unavailable — measures_ibis did not run.\n'
 
     sep = '─' * 47
-    lines = ['Validation Issues (see attachment for full detail)', sep]
+    lines = ['Validation Issues by Site (see attachments for full detail)', sep]
 
-    for severity in ['ERROR', 'WARNING']:
-        subset = report_df[report_df['severity'] == severity]
-        if subset.empty:
+    for (country, site), site_df in report_df.groupby(['country', 'site'], sort=True, dropna=False):
+        site_df = site_df[site_df['severity'].isin(['ERROR', 'WARNING'])]
+        if site_df.empty:
             continue
-        lines.append(f'\n  {severity}S ({len(subset)} record(s)):')
-        for (country, site), group in subset.groupby(['country', 'site'], sort=True, dropna=False):
-            header = f'{country} / {site}' if site else str(country)
-            lines.append(f'    {header}')
-            for check, cnt in group.groupby('check').size().items():
-                lines.append(f'      • {check}  ({cnt})')
+        header = f'{country} / {site}' if isinstance(site, str) and site else str(country)
+        lines.append(f'\n  {header}')
+        for severity in ['ERROR', 'WARNING']:
+            subset = site_df[site_df['severity'] == severity]
+            if subset.empty:
+                continue
+            lines.append(f'    {severity}S ({len(subset)} issue(s)):')
+            for check, group in subset.groupby('check'):
+                note = f'{len(group)} issue(s)'
+                if 'site_subjids' in group.columns:
+                    n_people = sum(len(s.split('; ')) for s in group['site_subjids'] if s)
+                    if n_people:
+                        note += f', {n_people} participant(s) at this site'
+                if 'other_sites' in group.columns and group['other_sites'].astype(bool).any():
+                    note += ', some shared with other sites'
+                lines.append(f'      • {check}  ({note})')
 
     lines.append(sep)
     return '\n'.join(lines)
+
+
+# Subjids and screening ids share the layout IBIS|SCRN <country> <facility> …
+_SUBJID_FACILITY = re.compile(r'^(?:IBIS|SCRN)\d(\d\d)')
+UNASSIGNED_SITE = 'Unassigned'
+
+
+def _facility_label(code: int) -> str:
+    name = FACILITY_CODES_UG.get(code) or FACILITY_CODES_KE.get(code)
+    return f'{code} ({name})' if name else str(code)
+
+
+def _split_by_site(report_df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Give every validation row a site, one row per site it touches.
+
+    Rows that already carry a site keep it. Cross-record checks (duplicate /
+    similar names and phones) are computed country-wide with a blank site, so
+    their site comes from the facility code in each affected subjid
+    (IBIS<country><facility>…). A row spanning several sites is repeated under
+    each one; site_subjids holds just that site's participants and other_sites
+    names the rest. Rows with no site and no parseable subjid go under
+    'Unassigned'.
+    """
+    out = []
+    for row in report_df.to_dict('records'):
+        subjids = [s.strip() for s in str(row.get('affected_subjids') or '').split(';') if s.strip()]
+        site = row.get('site')
+        if isinstance(site, str) and site.strip():
+            out.append({**row, 'site_subjids': '; '.join(subjids), 'other_sites': ''})
+            continue
+
+        by_site: dict[str, list[str]] = {}
+        for s in subjids:
+            m = _SUBJID_FACILITY.match(s)
+            label = _facility_label(int(m.group(1))) if m else UNASSIGNED_SITE
+            by_site.setdefault(label, []).append(s)
+        if not by_site:
+            by_site[UNASSIGNED_SITE] = []
+
+        for label, site_ids in by_site.items():
+            others = sorted(k for k in by_site if k != label)
+            out.append({**row, 'site': label, 'site_subjids': '; '.join(site_ids),
+                        'other_sites': ', '.join(others)})
+
+    split = pd.DataFrame(out, columns=list(report_df.columns) + ['site_subjids', 'other_sites'])
+    # Facility-coded sites in code order, Unassigned last
+    split['_order'] = split['site'].map(
+        lambda s: (1, s) if s == UNASSIGNED_SITE else (0, s)
+    )
+    return split.sort_values('_order', kind='stable').drop(columns='_order').reset_index(drop=True)
+
+
+def _site_csv_name(country: str, site: str) -> str:
+    """e.g. '11 (Bushenyi HCIV)' -> ibis_validation_uganda_11_Bushenyi_HCIV_2026-11-04.csv"""
+    slug = re.sub(r'[^A-Za-z0-9]+', '_', site).strip('_')
+    return f'ibis_validation_{country.lower()}_{slug}_{date.today().strftime("%Y-%m-%d")}.csv'
 
 
 def _attach_csv(msg: MIMEMultipart, df: pd.DataFrame, filename: str) -> None:
@@ -129,6 +198,7 @@ def _send(
     attachment_df: pd.DataFrame | None = None,
     attachment_filename: str | None = None,
     extra_attachments: list[tuple[pd.DataFrame, str]] | None = None,
+    cc: list[str] | None = None,
 ) -> None:
     """Assemble a multipart email and send it via SMTP with STARTTLS."""
     ini_path = email_cfg['keyfiles']['smtp_ini']
@@ -140,6 +210,9 @@ def _send(
     msg['Subject'] = subject
     msg['From'] = email_cfg['sender']
     msg['To'] = ', '.join(recipients)
+    cc = [a for a in (cc or []) if a not in recipients]
+    if cc:
+        msg['Cc'] = ', '.join(cc)
 
     alt = MIMEMultipart('alternative')
     alt.attach(MIMEText(plain, 'plain'))
@@ -156,7 +229,7 @@ def _send(
     with smtplib.SMTP(email_cfg['smtp_host'], email_cfg['smtp_port']) as smtp:
         smtp.starttls(context=ssl.create_default_context())
         smtp.login(username, password)
-        smtp.sendmail(email_cfg['sender'], recipients, msg.as_string())
+        smtp.sendmail(email_cfg['sender'], list(recipients) + cc, msg.as_string())
 
 
 def send_pipeline_report(
@@ -225,6 +298,23 @@ def send_pipeline_report(
             logger.error(f'Notifier failed (pipeline recipients) \u2014 email not sent: {exc}')
 
     # --- Field recipients: per-country, only when that country has issues ---
+    # Checks listed in field_report_exclude_checks are still computed and stored
+    # in ds_validation_report; they're only left out of the field email.
+    exclude_checks = email_cfg.get('field_report_exclude_checks') or []
+    if exclude_checks and report_df is not None and 'check' in report_df.columns:
+        report_df = report_df[~report_df['check'].isin(exclude_checks)]
+
+    # Countries listed in field_site_recipients get one email per site instead
+    # of a single country email (see _send_site_field_emails).
+    site_routing = {k.lower(): v for k, v in (email_cfg.get('field_site_recipients') or {}).items()}
+
+    # field_report_days (e.g. ["Mon", "Wed", "Fri"]) limits the field emails to
+    # those weekdays; the pipeline-status email above still goes out every run.
+    field_days = email_cfg.get('field_report_days')
+    if field_days and date.today().strftime('%a') not in field_days:
+        logger.info(f'Field quality report skipped — only sent on {", ".join(field_days)}.')
+        return
+
     field_recipients_cfg = email_cfg.get('field_recipients', {})
     if isinstance(field_recipients_cfg, dict) and report_df is not None and not report_df.empty:
         for country, recipients in field_recipients_cfg.items():
@@ -233,15 +323,88 @@ def send_pipeline_report(
             country_df = report_df[report_df['country'].str.lower() == country.lower()]
             if country_df.empty or not country_df['severity'].isin(['ERROR', 'WARNING']).any():
                 continue
+            site_df = _split_by_site(country_df)
+            routing = site_routing.get(country.lower())
+            if routing:
+                _send_site_field_emails(email_cfg, country, site_df, routing, recipients, today)
+                continue
+
             field_subject = f'IBIS Data Quality \u2014 {country.title()} issues found ({today})'
-            validation_section = _build_validation_summary(country_df)
+            validation_section = _build_validation_summary(site_df)
             field_plain = f'{stage_section}\n\n{validation_section}'
             field_html = f'<pre style="font-family:monospace;font-size:13px">{_html.escape(field_plain)}</pre>'
+            site_csvs = [
+                (group, _site_csv_name(country, site))
+                for site, group in site_df.groupby('site', sort=False)
+            ]
             try:
-                _send(email_cfg, recipients, field_subject, field_plain, field_html, attachment_df=country_df)
+                _send(email_cfg, recipients, field_subject, field_plain, field_html,
+                      extra_attachments=site_csvs)
                 logger.info(f'Field quality report ({country}) sent to {recipients}.')
             except Exception as exc:
                 logger.error(f'Notifier failed (field recipients {country}) \u2014 email not sent: {exc}')
+
+
+def _site_name(site: str) -> str:
+    """'12 (Ishaka Adventist Hospital (Bushenyi))' -> 'Ishaka Adventist Hospital (Bushenyi)'"""
+    m = re.match(r'^\d+ \((.*)\)$', site)
+    return m.group(1) if m else site
+
+
+def _send_site_field_emails(
+    email_cfg: dict,
+    country: str,
+    site_df: pd.DataFrame,
+    routing: dict,
+    fallback_recipients: list[str],
+    today: str,
+) -> None:
+    """
+    One field-quality email per site, to that site's contact(s) from
+    routing['sites'] (keyed by facility code), cc routing['cc']. Each email
+    holds only that site's issues and CSV. Sites with no contact (e.g.
+    'Unassigned', or a facility code not in the map) are combined into one
+    email to the country's field_recipients so nothing is dropped.
+    """
+    site_contacts = {str(k): v for k, v in (routing.get('sites') or {}).items()}
+    cc = routing.get('cc') or []
+    unrouted: list[pd.DataFrame] = []
+
+    for site, group in site_df.groupby('site', sort=False):
+        if not group['severity'].isin(['ERROR', 'WARNING']).any():
+            continue
+        to = site_contacts.get(site.split(' ', 1)[0])
+        if not to:
+            unrouted.append(group)
+            continue
+        name = _site_name(site)
+        subject = f'IBIS Data Quality — {name} issues found ({today})'
+        plain = (
+            f'Data quality issues for {name} from the latest IBIS pipeline run. '
+            f'Full detail is in the attached CSV.\n\n{_build_validation_summary(group)}'
+        )
+        html = f'<pre style="font-family:monospace;font-size:13px">{_html.escape(plain)}</pre>'
+        try:
+            _send(email_cfg, to, subject, plain, html,
+                  extra_attachments=[(group, _site_csv_name(country, site))], cc=cc)
+            logger.info(f'Field quality report ({country} / {name}) sent to {to}, cc {cc}.')
+        except Exception as exc:
+            logger.error(f'Notifier failed (field site {country} / {name}) — email not sent: {exc}')
+
+    if unrouted and fallback_recipients:
+        rest = pd.concat(unrouted, ignore_index=True)
+        subject = f'IBIS Data Quality — {country.title()} issues not linked to a site ({today})'
+        plain = (
+            'These issues could not be matched to a site contact, so they were not '
+            f'included in any site email.\n\n{_build_validation_summary(rest)}'
+        )
+        html = f'<pre style="font-family:monospace;font-size:13px">{_html.escape(plain)}</pre>'
+        attachments = [(g, _site_csv_name(country, s)) for s, g in rest.groupby('site', sort=False)]
+        try:
+            _send(email_cfg, fallback_recipients, subject, plain, html, extra_attachments=attachments)
+            logger.info(f'Field quality report ({country} / unrouted) sent to {fallback_recipients}.')
+        except Exception as exc:
+            logger.error(f'Notifier failed (field unrouted {country}) — email not sent: {exc}')
 
 
 def send_missed_run_alert(overdue: list[dict], config) -> None:

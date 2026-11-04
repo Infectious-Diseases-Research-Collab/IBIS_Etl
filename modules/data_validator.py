@@ -706,7 +706,12 @@ class DataValidator:
         )]
 
     def _check_duplicate_phone(self, df: pd.DataFrame) -> list[dict]:
-        """Exact duplicate mobile_number values after normalising formatting."""
+        """Exact duplicate mobile_number values after normalising formatting.
+
+        One issue per shared number (like duplicate_name), so each row's
+        subjids are just the records sharing that number and the field report
+        can file it under the right site(s).
+        """
         if self._PHONE_FIELD not in df.columns:
             return []
         raw = df[self._PHONE_FIELD].dropna()
@@ -716,24 +721,19 @@ class DataValidator:
         if raw.empty:
             return []
         normalised = raw.map(self._normalize_phone)
-        dup_mask = normalised.duplicated(keep=False)
-        n_dup = dup_mask.sum()
-        if not n_dup:
-            return []
-        examples = sorted(normalised[dup_mask].unique())[:5]
-        return [dict(
-            check='duplicate_phone',
-            severity='WARNING',
-            field=self._PHONE_FIELD,
-            record_count=int(n_dup),
-            detail=(
-                f"{n_dup} record(s) share a mobile number with at least one other "
-                f"({normalised[dup_mask].nunique()} distinct number(s) affected). "
-                f"Examples: {examples}"
-            ),
-            affected_subjids=self._subjids_for_mask(df, normalised[dup_mask].index),
-            affected_tablets=self._tablets_for_mask(df, normalised[dup_mask].index),
-        )]
+        dups = normalised[normalised.duplicated(keep=False)]
+        issues = []
+        for number, group in dups.groupby(dups, sort=True):
+            issues.append(dict(
+                check='duplicate_phone',
+                severity='WARNING',
+                field=self._PHONE_FIELD,
+                record_count=int(len(group)),
+                detail=f"{len(group)} record(s) share the mobile number {number}.",
+                affected_subjids=self._subjids_for_mask(df, group.index),
+                affected_tablets=self._tablets_for_mask(df, group.index),
+            ))
+        return issues
 
     @staticmethod
     def _one_digit_diff_pairs(
@@ -787,6 +787,8 @@ class DataValidator:
         """
         Flag pairs of same-length mobile numbers that differ by exactly one digit
         — the most common signature of a transposition or single-digit typo.
+        One issue per pair (like similar_name), so the field report can file
+        each pair under the site(s) it belongs to.
         """
         if self._PHONE_FIELD not in df.columns:
             return []
@@ -806,36 +808,26 @@ class DataValidator:
         for p, idx in zip(phones, indices):
             by_length.setdefault(len(p), []).append((p, idx))
 
-        pair_count = 0
-        affected_idx: list = []
-        phone_pairs: list[tuple[str, str]] = []
-
+        issues = []
         for grp in by_length.values():
             if len(grp) < 2:
                 continue
             grp_phones = [p for p, _ in grp]
             grp_indices = [i for _, i in grp]
             for idx_a, idx_b, pa, pb in self._one_digit_diff_pairs(grp_phones, grp_indices):
-                pair_count += 1
-                affected_idx.extend([idx_a, idx_b])
-                phone_pairs.append((pa, pb))
-
-        if not pair_count:
-            return []
-        affected_idx_unique = list(dict.fromkeys(affected_idx))  # deduplicate, preserve order
-        pairs_str = '; '.join(f"{a} / {b}" for a, b in phone_pairs)
-        return [dict(
-            check='similar_phone',
-            severity='WARNING',
-            field=self._PHONE_FIELD,
-            record_count=pair_count,
-            detail=(
-                f"{pair_count} pair(s) of mobile numbers differ by exactly "
-                f"one digit (possible transposition or typo): {pairs_str}."
-            ),
-            affected_subjids=self._subjids_for_mask(df, affected_idx_unique),
-            affected_tablets=self._tablets_for_mask(df, affected_idx_unique),
-        )]
+                issues.append(dict(
+                    check='similar_phone',
+                    severity='WARNING',
+                    field=self._PHONE_FIELD,
+                    record_count=1,
+                    detail=(
+                        f"Mobile numbers {pa} / {pb} differ by exactly one digit "
+                        f"(possible transposition or typo)."
+                    ),
+                    affected_subjids=self._subjids_for_mask(df, [idx_a, idx_b]),
+                    affected_tablets=self._tablets_for_mask(df, [idx_a, idx_b]),
+                ))
+        return issues
 
     def _check_duplicate_name(self, df: pd.DataFrame) -> list[dict]:
         """
