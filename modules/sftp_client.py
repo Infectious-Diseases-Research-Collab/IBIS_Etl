@@ -15,23 +15,36 @@ _TABLET_ARCHIVE_RE = re.compile(
 )
 
 
-def select_latest_remote_per_tablet(filenames: list[str]) -> dict[str, str]:
+def group_remote_archives_by_tablet(filenames: list[str]) -> dict[str, list[str]]:
     """
-    Return {tablet_id: filename} for the latest .7z archive per tablet.
-    Filenames not matching the Tablet###_YYYY_MM_DD-HH_MM_SS.7z pattern
-    are silently ignored.
+    Return {tablet_id: [filename, ...]} with each tablet's .7z archives
+    ordered newest first. Filenames not matching the
+    Tablet###_YYYY_MM_DD-HH_MM_SS.7z pattern are silently ignored.
     """
-    latest: dict[str, tuple[datetime, str]] = {}
+    grouped: dict[str, list[tuple[datetime, str]]] = {}
     for name in filenames:
         m = _TABLET_ARCHIVE_RE.match(name)
         if not m:
             continue
         tablet_id = m.group(1)
         ts = datetime.strptime(m.group(2), '%Y_%m_%d-%H_%M_%S')
-        existing_ts, _ = latest.get(tablet_id, (datetime.min, ''))
-        if ts > existing_ts:
-            latest[tablet_id] = (ts, name)
-    return {tablet_id: name for tablet_id, (_, name) in latest.items()}
+        grouped.setdefault(tablet_id, []).append((ts, name))
+    return {
+        tablet_id: [name for _, name in sorted(entries, reverse=True)]
+        for tablet_id, entries in grouped.items()
+    }
+
+
+def select_latest_remote_per_tablet(filenames: list[str]) -> dict[str, str]:
+    """
+    Return {tablet_id: filename} for the latest .7z archive per tablet.
+    Filenames not matching the Tablet###_YYYY_MM_DD-HH_MM_SS.7z pattern
+    are silently ignored.
+    """
+    return {
+        tablet_id: names[0]
+        for tablet_id, names in group_remote_archives_by_tablet(filenames).items()
+    }
 
 
 class SFTPClient:
