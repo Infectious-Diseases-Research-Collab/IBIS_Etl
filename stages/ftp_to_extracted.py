@@ -8,7 +8,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 import py7zr
 
 from modules.config import get_country_paths
-from modules.sftp_client import SFTPClient, select_latest_remote_per_tablet
+from modules.sftp_client import SFTPClient, group_remote_archives_by_tablet
 from modules.utils import get_decrypted_password
 from stages.base import BaseStage, StageResult
 
@@ -112,6 +112,70 @@ def _process_tablet(
         return 0, None, warning
 
 
+def _process_tablet_with_fallback(
+    hostname: str,
+    username: str,
+    ftp_password: str,
+    sevenz_password: str,
+    remote_path: str,
+    candidates: list[str],
+    download_dir: str,
+    extract_dir: str,
+    country: str,
+) -> tuple[int, str | None, dict | None]:
+    """
+    Try one tablet's archives newest first, stopping at the first that
+    extracts cleanly. Snapshots are cumulative, so when the newest archive is
+    corrupt (e.g. truncated mid-upload) the next-newest good one is enough.
+
+    Stops without extracting anything when it reaches an archive that is
+    already extracted locally — nothing older than that is newer than the data
+    we already have — or on a download failure. Returns the same tuple as
+    _process_tablet; the warning, if any, is the newest corrupt archive's,
+    with the fallback outcome appended to its detail.
+    """
+    warning: dict | None = None
+    corrupt: list[str] = []
+
+    for filename in candidates:
+        downloaded, error_msg, attempt_warning = _process_tablet(
+            hostname, username, ftp_password, sevenz_password,
+            remote_path, filename, download_dir, extract_dir, country,
+        )
+        if attempt_warning is None:
+            if warning is not None:
+                if downloaded:
+                    outcome = f"used older archive '{filename}' instead"
+                    logger.info(f"[{country}] Fell back to {filename} after corrupt {corrupt[0]}.")
+                elif error_msg:
+                    outcome = f"older archive '{filename}' failed to download"
+                else:
+                    outcome = (
+                        f"older archive '{filename}' is already extracted; "
+                        "no newer data loaded"
+                    )
+                warning['detail'] += _fallback_note(corrupt, outcome)
+            return downloaded, error_msg, warning
+
+        corrupt.append(filename)
+        if warning is None:
+            warning = attempt_warning
+
+    if warning is not None and len(corrupt) > 1:
+        warning['detail'] += _fallback_note(corrupt, 'all older archives were also corrupt')
+    elif warning is not None:
+        warning['detail'] += '; no older archive available'
+    return 0, None, warning
+
+
+def _fallback_note(corrupt: list[str], outcome: str) -> str:
+    older_corrupt = corrupt[1:]
+    note = f"; {outcome}"
+    if older_corrupt:
+        note += f" (also corrupt: {', '.join(older_corrupt)})"
+    return note
+
+
 class FtpToExtracted(BaseStage):
     name = 'ftp_to_extracted'
     dependencies: list[str] = []
@@ -153,20 +217,22 @@ class FtpToExtracted(BaseStage):
                 with SFTPClient(hostname, username, ftp_password) as sftp:
                     filenames = sftp.list_files(remote_path)
 
-                latest = select_latest_remote_per_tablet(filenames)
+                by_tablet = group_remote_archives_by_tablet(filenames)
                 logger.info(
-                    f"[{country}] {len(latest)} latest archive(s) found on FTP."
+                    f"[{country}] {len(by_tablet)} tablet(s) with archives found on FTP."
                 )
 
                 # Download tablets in parallel — each worker uses its own connection.
+                # Each tablet starts at its newest archive and falls back to
+                # older ones only if that archive is corrupt.
                 with ThreadPoolExecutor(max_workers=_MAX_WORKERS) as executor:
                     futures = {
                         executor.submit(
-                            _process_tablet,
+                            _process_tablet_with_fallback,
                             hostname, username, ftp_password, sevenz_password,
-                            remote_path, filename, download_dir, extract_dir, country,
-                        ): filename
-                        for filename in sorted(latest.values())
+                            remote_path, candidates, download_dir, extract_dir, country,
+                        ): tablet_id
+                        for tablet_id, candidates in sorted(by_tablet.items())
                     }
                     for future in as_completed(futures):
                         downloaded, error_msg, warning = future.result()

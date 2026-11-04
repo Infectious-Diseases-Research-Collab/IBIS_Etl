@@ -2,7 +2,9 @@
 import pytest
 from unittest.mock import MagicMock, patch
 
-from modules.sftp_client import select_latest_remote_per_tablet, SFTPClient
+from modules.sftp_client import (
+    group_remote_archives_by_tablet, select_latest_remote_per_tablet, SFTPClient,
+)
 
 
 def test_select_latest_picks_newest_for_same_tablet():
@@ -101,3 +103,22 @@ def test_sftp_client_connection_error_propagates():
         with pytest.raises(Exception, match='connection refused'):
             with SFTPClient('host', 'user', 'pass'):
                 pass
+
+
+def test_group_remote_archives_orders_newest_first_per_tablet():
+    filenames = [
+        'Tablet41_2026_11_04-09_20_33.7z',
+        'Tablet41_2026_11_04-17_10_10.7z',
+        'Tablet42_2026_11_01-08_00_00.7z',
+        'Tablet41_2026_11_03-12_00_00.7z',
+        'notes.txt',
+    ]
+    result = group_remote_archives_by_tablet(filenames)
+    assert result == {
+        'Tablet41': [
+            'Tablet41_2026_11_04-17_10_10.7z',
+            'Tablet41_2026_11_04-09_20_33.7z',
+            'Tablet41_2026_11_03-12_00_00.7z',
+        ],
+        'Tablet42': ['Tablet42_2026_11_01-08_00_00.7z'],
+    }
