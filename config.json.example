@@ -63,6 +63,14 @@
       "country1": ["dm-country1@example.com"],
       "country2": ["dm-country2@example.com"]
     },
+    "field_report_days": ["Mon", "Wed", "Fri"],
+    "field_site_recipients": {
+      "country1": {
+        "cc": ["dm-country1@example.com"],
+        "sites": {"11": ["site11-lead@example.com"]}
+      }
+    },
+    "field_report_exclude_checks": [],
     "notify_countries": ["country1", "country2"],
     "sms_dm_recipients": [],
     "sms_weekly_report_monday_recipients": [],

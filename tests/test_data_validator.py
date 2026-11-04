@@ -72,6 +72,19 @@ class TestDuplicatePhone(unittest.TestCase):
         self.assertEqual(len(issues), 1)
         self.assertEqual(issues[0]['check'], 'duplicate_phone')
 
+    def test_one_issue_per_shared_number(self):
+        df = pd.DataFrame({
+            'subjid': ['A1', 'A2', 'B1', 'B2', 'B3', 'C1'],
+            'mobile_number': ['0712345678', '0712345678',
+                              '0723456789', '0723456789', '0723456789', '0734567890'],
+        })
+        issues = self.v._check_duplicate_phone(df)
+        self.assertEqual(len(issues), 2)
+        by_count = {i['record_count']: i for i in issues}
+        self.assertEqual(set(by_count), {2, 3})
+        self.assertNotIn('C1', ''.join(i['affected_subjids'] for i in issues))
+        self.assertNotIn('A1', by_count[3]['affected_subjids'])
+
     def test_no_issue_when_all_unique(self):
         df = pd.DataFrame({'mobile_number': ['0712345678', '0723456789']})
         self.assertEqual(self.v._check_duplicate_phone(df), [])
@@ -139,6 +152,16 @@ class TestSimilarPhones(unittest.TestCase):
         self.assertEqual(len(issues), 1)
         self.assertEqual(issues[0]['check'], 'similar_phone')
         self.assertEqual(issues[0]['record_count'], 1)
+
+    def test_one_issue_per_pair(self):
+        df = pd.DataFrame({
+            'subjid': ['A1', 'A2', 'B1', 'B2'],
+            'mobile_number': ['712345678', '712345679', '788000001', '788000002'],
+        })
+        issues = self.v._check_similar_phones(df)
+        self.assertEqual(len(issues), 2)
+        subj_sets = sorted(set(i['affected_subjids'].split('; ')) for i in issues)
+        self.assertEqual(subj_sets, [{'A1', 'A2'}, {'B1', 'B2'}])
 
     def test_no_issue_when_numbers_differ_by_two_digits(self):
         df = pd.DataFrame({'mobile_number': ['712345678', '712345600']})
